@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "src/core",
+    "src/entities",
+    "src/persistence",
+    "src/components",
+    "src/data",
+    "src/systems",
+    "src/world",
+    "scripts"
+  ],
+  "exclude": [
+    "scripts/verify-world.ts"
+  ]
+}

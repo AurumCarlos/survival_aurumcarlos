@@ -1,0 +1,193 @@
+/**
+ * Checks for: felled trees losing their collider and nav obstacle, walking
+ * speed on/near buildings, step-up onto foundations, beds and sleeping,
+ * animal counts. Uses the real cannon-es physics.
+ */
+import { AIBrain, Creature, PlayerControlled, SurvivorC, Transform } from '../src/components';
+import { World } from '../src/core/ecs/World';
+import { EventBus } from '../src/core/EventBus';
+import { GameLoop, type FrameScheduler } from '../src/core/GameLoop';
+import { spawnCreature, spawnLeanTo, spawnPlayer } from '../src/entities/factories';
+import { BuildingPhysics } from '../src/physics/BuildingPhysics';
+import { PhysicsSystem } from '../src/physics/PhysicsSystem';
+import { PLAYER_SHAPE, PhysicsBody, PhysicsWorld } from '../src/physics/PhysicsWorld';
+import { NavGrid } from '../src/systems/ai/nav/NavGrid';
+import { BuildingGrid, type Candidate, type Piece } from '../src/systems/building/BuildingGrid';
+import { DayNightCycle, DEFAULT_DAY_NIGHT } from '../src/systems/DayNightCycle';
+import { EnvironmentSystem } from '../src/systems/EnvironmentSystem';
+import { SleepSystem } from '../src/systems/SleepSystem';
+import { SurvivalSystem } from '../src/systems/SurvivalSystem';
+import { creatureBudget, parseMapConfig, toTerrainConfig } from '../src/world/MapConfig';
+import { generateTerrain, type TerrainData } from '../src/world/TerrainGenerator';
+import { buildNavGrid } from '../src/systems/ai/nav/NavGrid';
+
+declare const process: { exit(code: number): never };
+let failures = 0;
+function check(name: string, ok: boolean, detail = ''): void {
+  if (!ok) failures++;
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  — ${detail}` : ''}`);
+}
+const manual = (): FrameScheduler => ({ now: () => 0, request: () => 0, cancel: () => undefined });
+
+/** Flat 64 m test ground at height 1, with one tree prop at (5, 0). */
+function flatTerrain(): TerrainData {
+  const size = 64, res = 48, n = res + 1;
+  const heights = new Float32Array(n * n).fill(1);
+  return {
+    cfg: { seed: 1, size, resolution: res, maxHeight: 0, baseFrequency: 0.01, waterLevel: -5, spawnClearRadius: 0, chunkSize: 32 },
+    heights, slopes: new Float32Array(n * n), chunksPerSide: 2, maxY: 1,
+    spawn: { x: 0, y: 1, z: 0, yaw: 0 },
+    props: [
+      { kind: 'tree', position: { x: 5, y: 1, z: 0 }, rotationY: 0, scale: 1, variant: 0, chunk: 3 },
+      { kind: 'tree', position: { x: 5, y: 1, z: 6 }, rotationY: 0, scale: 1, variant: 1, chunk: 3 },
+    ],
+  };
+}
+
+/** A player walking with a fixed desired velocity for `seconds`; returns the distance covered. */
+async function walk(physics: PhysicsWorld, world: World, player: number, vx: number, vz: number, seconds: number): Promise<{ dx: number; dz: number; y: number }> {
+  const loop = new GameLoop(world, { scheduler: manual() });
+  loop.addSystem({ name: 'intent', fixedUpdate: () => { const pc = world.require(player, PlayerControlled); pc.desiredVelocity.x = vx; pc.desiredVelocity.z = vz; } });
+  loop.addSystem(new PhysicsSystem(physics, -5));
+  const start = { ...world.require(player, Transform).position };
+  for (let t = 0; t <= seconds * 1000; t += 1000 / 60) loop.tick(t);
+  const p = world.require(player, Transform).position;
+  return { dx: p.x - start.x, dz: p.z - start.z, y: p.y };
+}
+
+function setup(): { world: World; physics: PhysicsWorld; player: number; t: TerrainData } {
+  const t = flatTerrain();
+  const world = new World();
+  const physics = new PhysicsWorld();
+  physics.addTerrain(t);
+  const player = spawnPlayer(world, { x: 0, y: 1, z: 0 });
+  const body = physics.createPlayerBody({ x: 0, y: 1, z: 0 });
+  world.add(player, PhysicsBody, { body, originOffsetY: PLAYER_SHAPE.height / 2 + 0.05 });
+  return { world, physics, player, t };
+}
+
+async function main(): Promise<void> {
+  console.log('\n── Felled trees stop being solid ──');
+  {
+    const { world, physics, player, t } = setup();
+    await physics.addStaticProps(t);
+    const blocked = await walk(physics, world, player, 4.2, 0, 2.5);
+    check('a standing tree blocks the player', blocked.dx < 5 - 0.3, `stopped after ${blocked.dx.toFixed(2)} m (trunk at 5 m)`);
+    physics.setPropSolid(0, false);
+    const through = await walk(physics, world, player, 4.2, 0, 2);
+    check('after felling, the player walks through where it stood', through.dx > 5, `moved ${through.dx.toFixed(2)} m more`);
+    physics.setPropSolid(0, true);
+    physics.setPropSolid(0, true); // idempotent
+    check('the other tree in the same chunk is still solid', (physics as unknown as { propShapes: Map<number, { active: boolean }> }).propShapes.get(1)!.active);
+
+    const nav = new NavGrid(buildNavGrid(t));
+    check('nav: the tree blocks creatures', !nav.isWalkable(5, 0));
+    nav.setObstacle(t.props[0]!, -1);
+    check('nav: felled → creatures can walk there', nav.isWalkable(5, 0) && !nav.isWalkable(5, 6));
+    nav.setObstacle(t.props[0]!, 1);
+    check('nav: regrown → blocked again', !nav.isWalkable(5, 0));
+  }
+
+  console.log('\n── Walking speed on and around buildings ──');
+  {
+    const { world, physics, player } = setup();
+    const grid = new BuildingGrid({ heightAt: () => 1, staticBlocked: () => false, waterLevel: -5 });
+    const events = new EventBus();
+    const cam = { position: { x: 0, y: 0, z: 0 }, getWorldDirection: (v: { set: (a: number, b: number, c: number) => unknown }) => v.set(0, 0, -1) };
+    new BuildingPhysics(grid, physics, cam as never, { x: 0, y: 0, z: 0, set() { return this; } } as never, events);
+    let id = 100;
+    const put = (c: Candidate): Piece => {
+      const p = grid.insert({ ...c, id: id++ });
+      events.emit('building:placed', { entity: p.id });
+      return p;
+    };
+    // A 3×1 strip of foundations from x = 3 to 12 at z 0..3, 0.45 m high, with a wall along its north edge.
+    for (let i = 1; i <= 3; i++) put({ kind: 'foundation', i, j: 0, y: 1.45 });
+    for (let i = 1; i <= 3; i++) put({ kind: 'wall', i, j: 0, y: 1.45, side: 'n' });
+    const body = world.require(player, PhysicsBody).body;
+    body.position.set(1, 1 + PLAYER_SHAPE.height / 2 + 0.05, 1.5);
+    const onto = await walk(physics, world, player, 4.2, 0, 1.2);
+    check('walks up onto a 0.45 m foundation without jumping', onto.y > 1.3, `feet at y=${onto.y.toFixed(2)} after ${onto.dx.toFixed(2)} m`);
+    const top = await walk(physics, world, player, 4.2, 0, 1);
+    check('full walking speed on top of a foundation (4.2 m/s)', top.dx > 3.8, `${top.dx.toFixed(2)} m in 1 s`);
+    body.position.set(4, body.position.y, 0.6); // hugging the wall (wall line z = 0, player radius 0.38)
+    world.require(player, Transform).position.x = 4; // keep the ECS copy in sync for the distance measurement
+    world.require(player, Transform).position.z = 0.6;
+    const along = await walk(physics, world, player, 4.2, -0.6, 1);
+    check('brushing along a wall barely slows you down', along.dx > 3.5, `${along.dx.toFixed(2)} m in 1 s`);
+  }
+
+  console.log('\n── Beds ──');
+  {
+    const g = new BuildingGrid({ heightAt: () => 1, staticBlocked: () => false, waterLevel: -5 });
+    check('a bed needs a floor', g.validate({ kind: 'bed', i: 0, j: 0, y: 1.4, side: 'n' }, null) !== null);
+    g.insert({ id: 1, kind: 'foundation', i: 0, j: 0, y: 1.4 });
+    check('a bed fits on a foundation', g.validate({ kind: 'bed', i: 0, j: 0, y: 1.4, side: 'n' }, null) === null);
+    g.insert({ id: 2, kind: 'bed', i: 0, j: 0, y: 1.4, side: 'n' });
+    check('only one bed per cell', g.validate({ kind: 'bed', i: 0, j: 0, y: 1.4, side: 'e' }, null) !== null);
+    check('a bed does not count as a floor (no wall/ceiling support from it)', g.floorAt(0, 0, 1.4)?.kind === 'foundation');
+    const removed = g.remove(1).map((p) => p.kind).join(',');
+    check('removing the foundation takes the bed with it', removed === 'foundation,bed', removed);
+    const b = BuildingGrid.bedPlacement({ kind: 'bed', i: 0, j: 0, y: 0, side: 'n' });
+    check('the headboard goes against the chosen edge', b.z < 1.5 && !b.alongX);
+  }
+
+  console.log('\n── Sleeping through the night ──');
+  {
+    const world = new World();
+    const events = new EventBus();
+    const cycle = new DayNightCycle({ ...DEFAULT_DAY_NIGHT, seed: 3 });
+    const survival = new SurvivalSystem(events);
+    const env = new EnvironmentSystem(cycle, () => ({ insulation: 0.9, roof: true })); // in a closed, roofed house
+    const sleep = new SleepSystem(world, events, cycle, [env, survival]);
+    const p = spawnPlayer(world, { x: 0, y: 0, z: 0 });
+    const s = world.require(p, SurvivorC);
+    env.fixedUpdate(world, 0);
+    const refused: string[] = [];
+    events.on('sleep:refused', ({ reason }) => refused.push(reason));
+    let slept = 0;
+    events.on('player:slept', ({ hours }) => (slept = hours));
+
+    cycle.setHour(13);
+    check('can\'t sleep in the afternoon', !sleep.trySleep(p) && refused.length === 1, refused[0]);
+    cycle.setHour(22);
+    const wolf = spawnCreature(world, 'wolf', { x: 8, y: 0, z: 0 }, 1);
+    world.require(wolf, AIBrain).blackboard.state = 'hunt';
+    check('can\'t sleep with a hunting wolf nearby', !sleep.trySleep(p), refused[1]);
+    world.require(wolf, Transform).position.x = 200;
+    world.require(wolf, AIBrain).blackboard.state = 'patrol';
+    world.require(wolf, Creature).perception.awareness = 0;
+    s.vitals.energy = 15;
+    const day = cycle.day;
+    const ok = sleep.trySleep(p);
+    check('sleeping at 22:00 wakes you at 06:30 the next day', ok && Math.abs(cycle.hour - 6.5) < 0.05 && cycle.day === day + 1, `${slept.toFixed(1)} h, now ${cycle.hour.toFixed(2)} h`);
+    check('energy is restored, hunger/thirst dropped a little', s.vitals.energy > 90 && s.vitals.hunger < 85 && s.vitals.hunger > 60 && s.alive,
+      `energy ${s.vitals.energy.toFixed(0)}, hunger ${s.vitals.hunger.toFixed(0)}, thirst ${s.vitals.thirst.toFixed(0)}`);
+
+    // Sleeping outside in the cold is dangerous.
+    const w2 = new World();
+    const c2 = new DayNightCycle({ ...DEFAULT_DAY_NIGHT, seed: 7 });
+    const ev2 = new EventBus();
+    const surv2 = new SurvivalSystem(ev2);
+    const env2 = new EnvironmentSystem(c2);
+    const p2 = spawnPlayer(w2, { x: 0, y: 0, z: 0 });
+    c2.setHour(21);
+    env2.fixedUpdate(w2, 0);
+    new SleepSystem(w2, ev2, c2, [env2, surv2]).trySleep(p2);
+    const s2 = w2.require(p2, SurvivorC);
+    check('sleeping outside on a cold night costs health (or your life)', !s2.alive || s2.vitals.health < 100, `health ${s2.vitals.health.toFixed(0)}, alive ${s2.alive}`);
+    void spawnLeanTo;
+  }
+
+  console.log('\n── More animals ──');
+  {
+    const b = creatureBudget(parseMapConfig({ size: 256, seed: 1 }));
+    console.log(`   256 m map: ${b.wolf} wolves, ${b.deer} deer, ${b.boar} boars (was 4 / 7 / 3)`);
+    check('about twice as many animals', b.wolf + b.deer + b.boar >= 28);
+    void generateTerrain; void toTerrainConfig;
+  }
+
+  console.log(`\n${failures === 0 ? 'All checks passed.' : `${failures} check(s) FAILED.`}`);
+  process.exit(failures === 0 ? 0 : 1);
+}
+void main();
