@@ -157,3 +157,60 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color:
 .sleep-fade { position: absolute; inset: 0; background: #000; opacity: 0; pointer-events: none; }
 .sleep-fade.on { animation: wake 2.4s ease-out forwards; }
 @keyframes wake { 0% { opacity: 1; } 35% { opacity: 1; } 100% { opacity: 0; } }
+
+/* ---- Inventory + crafting menu (round 7) ------------------------------------ */
+.inventory { gap: 18px; align-items: flex-start; padding-top: 4vh; overflow-y: auto; }
+.inv-col { max-height: 90vh; }
+.inv-left { display: flex; flex-direction: column; gap: 8px; }
+.inv-left .hint, .box .hint { font-size: 11px; color: var(--ink-dim); margin: 2px 0 0; max-width: 460px; }
+.grid { background-size: 46px 46px; }
+.item { display: flex; flex-direction: column; justify-content: flex-start; font-size: 10px; line-height: 1.15; padding: 3px; }
+.item span { overflow: hidden; text-overflow: ellipsis; }
+.item i { position: absolute; left: 3px; right: auto; bottom: 2px; height: 2px; background: var(--good); }
+.cat-material { background: #3b4a3a; } .cat-refined { background: #3a4a52; } .cat-medicine { background: #5a3346; }
+.cat-ammo { background: #3d4458; } .cat-food, .cat-drink { background: #5a4630; }
+.worn { font-size: 12px; color: var(--ink-dim); display: flex; gap: 8px; align-items: center; }
+.worn button, .craft-btns button, .box button, .craft-tabs button { font: inherit; color: var(--ink); background: rgba(255,255,255,.07); border: 1px solid var(--line); border-radius: 5px; padding: 4px 10px; cursor: pointer; }
+.worn button:hover, .craft-btns button:hover:not(:disabled), .box button:hover:not(:disabled), .craft-tabs button:hover { background: rgba(255,255,255,.14); }
+button:disabled { opacity: .4; cursor: not-allowed; }
+.inv-right { width: 600px; max-width: 58vw; }
+.craft-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.craft-head h2 { margin: 0; }
+.craft-search { flex: 0 1 220px; font: inherit; font-size: 13px; color: var(--ink); background: rgba(0,0,0,.3); border: 1px solid var(--line); border-radius: 5px; padding: 5px 9px; }
+.craft-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 10px 0 6px; }
+.craft-tabs button { font-size: 12px; padding: 3px 9px; }
+.craft-tabs button.on { background: var(--ink); color: #1b1f1a; border-color: var(--ink); }
+.craft-stations { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; font-size: 11px; }
+.craft-stations span { padding: 2px 7px; border-radius: 10px; border: 1px dashed var(--line); color: var(--ink-dim); }
+.craft-stations span.near { border-style: solid; border-color: var(--good); color: var(--good); }
+.craft-body { display: grid; grid-template-columns: 1fr 1.1fr; gap: 10px; }
+.craft-list { display: flex; flex-direction: column; gap: 4px; max-height: 48vh; overflow-y: auto; padding-right: 4px; }
+.recipe { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 6px 9px; }
+.recipe small { display: flex; gap: 6px; align-items: center; margin: 0; }
+.recipe small u { text-decoration: none; font-size: 10px; padding: 1px 5px; border-radius: 8px; background: rgba(255,255,255,.08); }
+.recipe small b { color: var(--good); }
+.recipe.missing { opacity: .5; } .recipe.station { opacity: .8; }
+.recipe.sel { border-color: var(--ink); background: rgba(255,255,255,.12); opacity: 1; }
+.craft-detail { background: rgba(0,0,0,.18); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; font-size: 13px; align-self: start; }
+.craft-detail h3 { margin: 0 0 4px; font-size: 15px; }
+.craft-detail .desc { margin: 0 0 6px; color: var(--ink-dim); font-size: 12px; }
+.craft-detail .stats { margin: 0 0 6px; font-size: 12px; }
+.needs { list-style: none; margin: 0 0 8px; padding: 0; }
+.needs li { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px dotted var(--line); }
+.have { color: var(--good); } .lack { color: #e6866f; }
+.where { font-size: 12px; margin: 0 0 8px; }
+.craft-btns { display: flex; gap: 6px; }
+.craft-btns .c1 { flex: 1; font-weight: bold; }
+.proc-list { display: flex; flex-direction: column; gap: 4px; }
+.proc-row { display: flex; flex-direction: column; font-size: 12px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 5px; background: rgba(255,255,255,.04); }
+.proc-row span { color: var(--ink-dim); } .proc-row small { color: var(--ink-dim); font-size: 11px; }
+.box { display: flex; flex-direction: column; gap: 8px; }
+.box h2 { margin: 0; }
+.fire { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.proc { font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
+.proc b { display: block; height: 5px; background: rgba(255,255,255,.1); border-radius: 3px; overflow: hidden; }
+.proc b i { display: block; height: 100%; width: 0; background: #f0a040; }
+.makes { font-size: 12px; } .makes summary { cursor: pointer; color: var(--ink-dim); } .makes div { padding: 2px 0; }
+.box-actions { display: flex; justify-content: flex-end; }
+.hotbar .slot em { position: absolute; right: 4px; top: 2px; font-style: normal; font-size: 10px; font-weight: bold; }
+@media (max-width: 1100px) { .inventory { flex-direction: column; align-items: center; } .inv-right { max-width: 94vw; } }

@@ -1,3 +1,4 @@
+import { itemDef } from '../../data/items';
 import { defineComponent, type Entity, type System, type World } from '../../core/ecs/World';
 import type { EventBus } from '../../core/EventBus';
 import type { InputManager } from '../../core/Input';
@@ -182,17 +183,19 @@ export function pieceCentre(p: Piece): Vec3 {
     return { x: b.x, y: p.y + 0.3, z: b.z };
   }
   if (p.kind === 'foundation' || p.kind === 'ceiling') return { x: (p.i + 0.5) * CELL, y: p.y, z: (p.j + 0.5) * CELL };
+  if (p.kind === 'stairs') return { x: (p.i + 0.5) * CELL, y: p.y + WALL_HEIGHT / 2, z: (p.j + 0.5) * CELL };
   const s = edgeSegment(edgeOf(p.i, p.j, p.side!));
   return { x: (s.x0 + s.x1) / 2, y: p.y + WALL_HEIGHT / 2, z: (s.z0 + s.z1) / 2 };
 }
 
 function missingCost(kind: PieceKind, inv: InventoryGrid): string | null {
   const missing = PIECE_COSTS[kind].filter((c) => inv.count(c.item) < c.qty);
-  return missing.length ? `Need ${missing.map((m) => `${m.qty - inv.count(m.item)} more ${m.item}`).join(', ')}` : null;
+  return missing.length ? `Need ${missing.map((m) => `${m.qty - inv.count(m.item)} more ${itemDef(m.item).name}`).join(', ')}` : null;
 }
 
 function hint(kind: PieceKind): string {
   if (kind === 'wall' || kind === 'doorway' || kind === 'bed') return 'Aim at the top of a foundation or floor';
+  if (kind === 'stairs') return 'Aim at a floor — they climb the way you look';
   if (kind === 'ceiling') return 'Aim above your walls';
   return 'Aim at the ground';
 }

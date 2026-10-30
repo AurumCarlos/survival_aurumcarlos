@@ -2,7 +2,7 @@ import * as CANNON from 'cannon-es';
 import type * as THREE from 'three';
 import type { EventBus } from '../core/EventBus';
 import type { Vec3 } from '../data/schema';
-import { BED, BuildingGrid, CELL, DOOR, WALL_HEIGHT, edgeOf, edgeSegment, type Piece } from '../systems/building/BuildingGrid';
+import { BED, BuildingGrid, CELL, DOOR, STAIRS, WALL_HEIGHT, edgeOf, edgeSegment, type Piece } from '../systems/building/BuildingGrid';
 import type { AimProvider } from '../systems/building/BuildingSystem';
 import { Groups, type PhysicsWorld } from './PhysicsWorld';
 
@@ -82,7 +82,21 @@ export class BuildingPhysics implements AimProvider {
     const main = new CANNON.Body({ mass: 0, collisionFilterGroup: Groups.BUILDING, collisionFilterMask: Groups.PLAYER | Groups.PROJECTILE });
     let door: CANNON.Body | undefined;
 
-    if (p.kind === 'bed') {
+    if (p.kind === 'stairs') {
+      // No walkable collider: the player is snapped onto the stairs surface
+      // (PhysicsSystem) so they never slide down a ramp. This sloped slab
+      // only answers the aim raycast (to demolish it) and projectiles.
+      main.collisionFilterMask = Groups.PROJECTILE;
+      const ex = p.side === 'e' || p.side === 'w';
+      const L = (Math.SQRT2 * CELL) / 2;
+      main.addShape(new CANNON.Box(ex ? new CANNON.Vec3(L, 0.1, STAIRS.width / 2) : new CANNON.Vec3(STAIRS.width / 2, 0.1, L)));
+      main.position.set((p.i + 0.5) * CELL, p.y + WALL_HEIGHT / 2 - 0.15, (p.j + 0.5) * CELL);
+      const a = Math.PI / 4;
+      if (p.side === 'e') main.quaternion.setFromEuler(0, 0, a);
+      else if (p.side === 'w') main.quaternion.setFromEuler(0, 0, -a);
+      else if (p.side === 's') main.quaternion.setFromEuler(-a, 0, 0);
+      else main.quaternion.setFromEuler(a, 0, 0);
+    } else if (p.kind === 'bed') {
       const b = BuildingGrid.bedPlacement(p);
       main.addShape(new CANNON.Box(b.alongX
         ? new CANNON.Vec3(BED.length / 2, BED.height / 2, BED.width / 2)

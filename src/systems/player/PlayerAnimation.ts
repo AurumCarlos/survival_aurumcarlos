@@ -90,7 +90,7 @@ const ACTIONS: ReadonlySet<AnimState> = new Set<AnimState>(['swing', 'harvest', 
 
 /** Can this action be performed with what's in hand? */
 export function actionAllowed(action: AnimAction, held: ItemId | null): boolean {
-  if (action === 'throw') return held === 'stone_spear';
+  if (action === 'throw') return held === 'stone_spear' || held === 'bow'; // throw the spear, draw the bow
   return true; // swing/harvest work with any tool or bare hands
 }
 

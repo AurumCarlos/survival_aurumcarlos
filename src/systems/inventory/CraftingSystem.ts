@@ -1,6 +1,7 @@
 import type { Entity, System, World } from '../../core/ecs/World';
 import type { EventBus } from '../../core/EventBus';
-import { HeatSource, SurvivorC, Transform } from '../../components';
+import { HeatSource, Structure, SurvivorC, Transform } from '../../components';
+import { STRUCTURES } from '../../data/stations';
 import { RECIPES_BY_ID, type CraftingStation } from '../../data/recipes';
 import { itemDef } from '../../data/items';
 import { CraftingEngine } from './CraftingEngine';
@@ -18,7 +19,7 @@ export interface CraftJob {
   reportedFull: boolean;
 }
 
-const STATION_RANGE = 3.5;
+export const STATION_RANGE = 3.5;
 export const MAX_CRAFT_QUEUE = 6;
 
 /**
@@ -58,7 +59,14 @@ export class CraftingSystem implements System {
       const h = world.require(f, HeatSource);
       if (!h.lit || !h.isStation) continue;
       const fp = world.require(f, Transform).position;
-      if (Math.hypot(fp.x - p.x, fp.z - p.z) <= STATION_RANGE) out.add(h.isStation);
+      if (Math.hypot(fp.x - p.x, fp.z - p.z) <= STATION_RANGE && Math.abs(fp.y - p.y) < 2.5) out.add(h.isStation);
+    }
+    // Stations that need no fire (mortar & pestle, smithy).
+    for (const f of world.query(Structure, Transform)) {
+      const def = STRUCTURES[world.require(f, Structure).kind];
+      if (!def.craftStation || def.fuel) continue;
+      const fp = world.require(f, Transform).position;
+      if (Math.hypot(fp.x - p.x, fp.z - p.z) <= STATION_RANGE && Math.abs(fp.y - p.y) < 2.5) out.add(def.craftStation);
     }
     return out;
   }

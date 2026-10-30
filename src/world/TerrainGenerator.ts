@@ -1,5 +1,6 @@
 import type { ResourceKind, Vec3 } from '../data/schema';
 import { Perlin, hash2, mulberry32 } from './Noise';
+import { SPECIES } from './TreeSpecies';
 
 /**
  * Procedural desert island. Produces *data only* (heights + placements); the
@@ -53,7 +54,7 @@ export const ISLAND = {
   seaDepth: 6,
 } as const;
 
-export type PropKind = ResourceKind | 'grass_tuft' | 'log' | 'mushroom';
+export type PropKind = ResourceKind | 'grass_tuft' | 'log';
 
 export interface PropPlacement {
   kind: PropKind;
@@ -263,6 +264,7 @@ function scatterProps(t: TerrainData, island: IslandShape, rand: () => number): 
   const W = cfg.waterLevel;
   const out: PropPlacement[] = [];
   const noise = new Perlin(cfg.seed + 101);
+  const groves = new Perlin(cfg.seed + 202);
   const half = cfg.size / 2;
   const sp = t.spawn;
   const push = (kind: PropKind, x: number, z: number, scale: number, variant = Math.floor(rand() * 4)): void => {
@@ -285,9 +287,16 @@ function scatterProps(t: TerrainData, island: IslandShape, rand: () => number): 
       const edge = clamp(depth / 10, 0.15, 1);
       const clearing = (noise.fbm(x / 28, z / 28, 2) + 1) / 2 < 0.27;
       if (rand() > edge * (clearing ? 0.1 : 0.93)) continue;
-      // 1 in 5 is a young fir, so the canopy has layers instead of one flat height.
+      // 1 in 5 is a young tree, so the canopy has layers instead of one flat height.
       const young = rand() < 0.2;
       push('tree', x, z, young ? 0.35 + rand() * 0.25 : 0.75 + rand() * 0.5);
+      // Species from broad noise fields (groves), with per-tree jitter so the
+      // mix is patchy rather than uniform. Uses hashes, not rand(), so the
+      // positions — and therefore save-file resource ids — don't change.
+      const last = out[out.length - 1]!;
+      const sp = pickSpecies(groves, x, z, depth, cfg.seed);
+      last.variant = sp * 4 + (last.variant % 4);
+      last.scale *= SPECIES_SCALE[sp]!;
       trees.set(key(cx, cz), { x, z });
     }
   }
@@ -337,7 +346,122 @@ function scatterProps(t: TerrainData, island: IslandShape, rand: () => number): 
       out.push({ kind: 'water_source', position: { x, y: W, z }, rotationY: 0, scale: 1, variant: 0, chunk: chunkIndex(t, x, z) });
     }
   }
+
+  // ---- 4. ARK resources, palms, flowers (appended: older prop indices stay valid) ----
+  scatterExtras(t, island, out, nearTrunk, noise);
   return out;
+}
+
+/**
+ * Trees are drawn 25 % taller than their base scale (mature firs 15–25 m)
+ * without thickening trunks, so the forest stays as walkable as before.
+ * Applied by the renderer; colliders only care about trunk radius.
+ */
+export const TREE_HEIGHT_STRETCH = 1.25;
+/** Per-species size spread on top of the base scale. */
+const SPECIES_SCALE = [1, 1, 1, 1.1, 0.95, 1.05, 1];
+
+/**
+ * Picks a species from three slow noise fields. Each species has a preferred
+ * "climate"; the strongest wins, plus random jitter, so groves of one
+ * species blend at their edges and the odd tree of another kind grows inside.
+ */
+function pickSpecies(groves: Perlin, x: number, z: number, depth: number, seed: number): number {
+  const a = groves.fbm(x / 70 + 300, z / 70 - 120, 2); // ≈ −0.8..0.8
+  const b = groves.fbm(x / 55 - 77, z / 55 + 410, 2);
+  const c = groves.fbm(x / 38 + 911, z / 38 + 37, 2);
+  const edge = Math.max(0, 1 - depth / 14); // forest edge: broadleaves and birch
+  const w = [
+    0.62 + 1.2 * a, // fir — still the most common
+    0.5 + 1.5 * b, // spruce
+    0.42 - 1.4 * a, // pine
+    0.45 - 1.4 * b + edge * 0.7, // oak
+    0.38 + 1.2 * (b - a) + edge * 0.8, // birch
+    c > 0.32 ? 1.4 + c : -9, // redwood: only in a few grove cores
+  ];
+  let best = 0, bestW = -Infinity;
+  for (let i = 0; i < w.length; i++) {
+    const jitter = hash2(Math.round(x * 7) + i * 131, Math.round(z * 7) - i * 71, seed + 33) * 0.55;
+    if (w[i]! + jitter > bestW) {
+      bestW = w[i]! + jitter;
+      best = i;
+    }
+  }
+  return best;
+}
+
+/**
+ * Second, independent pass (own RNG): palms on the beach, ARK resource nodes
+ * (metal/obsidian/crystal outcrops inland; oil rocks, salt, shell beds and
+ * fish along the shore), and rare flowers in clearings.
+ */
+function scatterExtras(
+  t: TerrainData, island: IslandShape, out: PropPlacement[],
+  nearTrunk: (x: number, z: number, d: number) => boolean, noise: Perlin,
+): void {
+  const cfg = t.cfg;
+  const W = cfg.waterLevel;
+  const half = cfg.size / 2;
+  const rand = mulberry32(cfg.seed + 7777);
+  const sp = t.spawn;
+  const taken: Array<{ x: number; z: number; r: number }> = [];
+  const free = (x: number, z: number, r: number, trunkGap = 0.8): boolean =>
+    Math.hypot(x - sp.x, z - sp.z) > cfg.spawnClearRadius + 2 && !nearTrunk(x, z, r + trunkGap) &&
+    taken.every((o) => Math.hypot(o.x - x, o.z - z) > o.r + r);
+  const add = (kind: PropKind, x: number, z: number, scale: number, variant = Math.floor(rand() * 4), y?: number): void => {
+    out.push({ kind, position: { x, y: y ?? sampleHeight(t, x, z), z }, rotationY: rand() * Math.PI * 2, scale, variant, chunk: chunkIndex(t, x, z) });
+    taken.push({ x, z, r: Math.max(0.8, scale) });
+  };
+  const grid = (cell: number, f: (x: number, z: number) => void): void => {
+    for (let gz = -half + cell / 2; gz < half; gz += cell) {
+      for (let gx = -half + cell / 2; gx < half; gx += cell) f(gx + (rand() - 0.5) * cell * 0.8, gz + (rand() - 0.5) * cell * 0.8);
+    }
+  };
+
+  // Shore: palms, oil rocks, salt crusts, shell beds; fish in the lagoon.
+  grid(6, (x, z) => {
+    const { d, beach } = island.zone(x, z);
+    const r = rand();
+    if (d < -16 || d > beach) return;
+    const h = sampleHeight(t, x, z);
+    if (h < W - 0.15) {
+      if (d < -5 && r < 0.14) add('fish_shoal', x, z, 1, 0, W); // out in the lagoon, swim to them
+      return;
+    }
+    if (h < W + 0.12) {
+      if (r < 0.16) add('shell_bed', x, z, 0.8 + rand() * 0.5, Math.floor(rand() * 4), Math.max(W, h)); // at the waterline
+      return;
+    }
+    if (d > beach * 0.6 && r < 0.13 && free(x, z, 0.4)) add('tree', x, z, 0.9 + rand() * 0.35, SPECIES.palm * 4 + Math.floor(rand() * 4));
+    else if (r > 0.97 && free(x, z, 0.7)) add('oil_rock', x, z, 0.9 + rand() * 0.4);
+    else if (r > 0.94 && d < beach * 0.6 && free(x, z, 0.6)) add('salt_deposit', x, z, 0.8 + rand() * 0.4);
+  });
+
+  // Inland mineral outcrops: small clusters of metal, obsidian, crystal and stone.
+  const minHigh = W + cfg.maxHeight * 0.45;
+  grid(20, (cx, cz) => {
+    const { d, beach } = island.zone(cx, cz);
+    if (d - beach < 10 || rand() > 0.7) return;
+    const high = sampleHeight(t, cx, cz) > minHigh;
+    const n = 4 + Math.floor(rand() * 4);
+    for (let k = 0; k < n; k++) {
+      const a = rand() * Math.PI * 2, rr = 1.5 + rand() * 4;
+      const x = cx + Math.cos(a) * rr, z = cz + Math.sin(a) * rr;
+      const scale = 0.9 + rand() * 0.6;
+      if (sampleHeight(t, x, z) < W + 0.5 || sampleSlope(t, x, z) > 0.45 || !free(x, z, 0.6 * scale, 0.5)) continue;
+      const roll = rand();
+      const kind: PropKind = roll < 0.42 ? 'metal_rock' : roll < 0.56 ? 'rock' : roll < (high ? 0.78 : 0.74) ? 'obsidian_rock' : high || roll > 0.86 ? 'crystal' : 'metal_rock';
+      add(kind, x, z, kind === 'rock' ? 1.1 + rand() * 0.4 : scale);
+    }
+  });
+
+  // Rare flowers, mostly in clearings.
+  grid(5, (x, z) => {
+    const { d, beach } = island.zone(x, z);
+    if (d - beach < 4) return;
+    const clearing = (noise.fbm(x / 28, z / 28, 2) + 1) / 2 < 0.3;
+    if (rand() < (clearing ? 0.12 : 0.02) && sampleHeight(t, x, z) > W + 0.4 && free(x, z, 0.3, 0.2)) add('rare_flower', x, z, 0.8 + rand() * 0.5);
+  });
 }
 
 function lerp(a: number, b: number, t: number): number {

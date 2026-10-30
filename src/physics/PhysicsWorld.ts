@@ -2,7 +2,8 @@ import * as CANNON from 'cannon-es';
 import { defineComponent } from '../core/ecs/World';
 import type { Vec3 } from '../data/schema';
 import type { TerrainData } from '../world/TerrainGenerator';
-import { FIR_HEIGHT, obstacleRadius } from '../systems/ai/nav/NavGrid';
+import { obstacleRadius } from '../systems/ai/nav/NavGrid';
+import { treeHeight } from '../world/TreeSpecies';
 import { timeSliced } from '../core/TimeSlice';
 
 /** Collision groups (bitmask). */
@@ -117,7 +118,7 @@ export class PhysicsWorld {
         let offset: CANNON.Vec3;
         // One shape per prop (not shared) so a felled tree's shape can be removed.
         if (p.kind === 'tree') {
-          const h = Math.min(8, FIR_HEIGHT * p.scale); // nothing gets over 8 m; no need for a 20 m shape
+          const h = Math.min(8, treeHeight(p.variant) * p.scale); // nothing gets over 8 m; no need for a 20 m shape
           shape = new CANNON.Cylinder(r, r, h, 6);
           offset = new CANNON.Vec3(p.position.x - o.x, p.position.y + h / 2 - o.y, p.position.z - o.z);
         } else {
@@ -204,6 +205,16 @@ export class PhysicsWorld {
     body.updateMassProperties();
     this.world.addBody(body);
     return body;
+  }
+
+  /** Closest hit between two points (filtered by group mask), with the collision group of what was hit. */
+  raycast(from: Vec3, to: Vec3, mask: number): { point: Vec3; group: number } | null {
+    this.rayFrom.set(from.x, from.y, from.z);
+    this.rayTo.set(to.x, to.y, to.z);
+    this.rayResult.reset();
+    if (!this.world.raycastClosest(this.rayFrom, this.rayTo, { collisionFilterMask: mask, skipBackfaces: true }, this.rayResult) || !this.rayResult.body) return null;
+    const p = this.rayResult.hitPointWorld;
+    return { point: { x: p.x, y: p.y, z: p.z }, group: this.rayResult.body.collisionFilterGroup };
   }
 
   /** True if nothing static/terrain lies between the two points. */

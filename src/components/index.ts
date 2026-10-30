@@ -1,5 +1,6 @@
 import { defineComponent } from '../core/ecs/World';
-import type { Resource, Survivor, ThermalExposure, Vec3 } from '../data/schema';
+import type { CraftingStation } from '../data/recipes';
+import type { InventoryGridData, PlaceableKind, Resource, Survivor, ThermalExposure, Vec3 } from '../data/schema';
 
 /**
  * Engine-free components. Nothing here imports three or cannon-es; the render
@@ -73,10 +74,24 @@ export interface HeatSource {
   fuelSeconds: number;
   /** Fires make light and noise — wolves avoid them at night. */
   scaresCreatures: boolean;
-  /** Can be used as a crafting station. */
-  isStation: 'campfire' | null;
+  /** Can be used as a crafting station while lit. */
+  isStation: CraftingStation | null;
 }
 export const HeatSource = defineComponent<HeatSource>('HeatSource');
+
+/**
+ * A placed structure (campfire, storage box, forge…). Fuel-burning ones also
+ * carry a HeatSource (its `lit` / `fuelSeconds` are the fire's state).
+ */
+export interface Structure {
+  kind: PlaceableKind;
+  yaw: number;
+  /** Items inside (storage, fuel, things to cook/smelt). Null if it has no inventory. */
+  container: InventoryGridData | null;
+  /** Current cooking/smelting batch. */
+  processing: { recipeId: string | null; progress: number };
+}
+export const Structure = defineComponent<Structure>('Structure');
 
 export interface ShelterZone {
   /** Axis-aligned volume around the entity's Transform. */

@@ -47,7 +47,7 @@ export class BuildingNav {
   }
 
   rectsFor(p: Piece): Rect[] {
-    if (p.kind === 'ceiling' || p.kind === 'bed') return []; // upper floors / furniture don't block paths
+    if (p.kind === 'ceiling' || p.kind === 'bed' || p.kind === 'stairs') return []; // upper floors / furniture don't block paths
     if (p.kind === 'foundation') {
       const tall = p.y - this.grid.groundUnder(p.i, p.j) > CREATURE_STEP;
       return tall ? [[p.i * CELL, p.j * CELL, (p.i + 1) * CELL, (p.j + 1) * CELL]] : [];

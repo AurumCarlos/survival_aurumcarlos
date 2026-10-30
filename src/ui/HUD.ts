@@ -1,3 +1,4 @@
+import { RESOURCE_LABEL } from '../data/items';
 import type { Entity, World } from '../core/ecs/World';
 import type { EventBus } from '../core/EventBus';
 import type { GameLoop } from '../core/GameLoop';
@@ -5,7 +6,7 @@ import { BuilderC } from '../systems/building/BuildingSystem';
 import { PIECE_COSTS, PIECE_LABEL, PIECE_ORDER } from '../systems/building/BuildingGrid';
 import { InventoryGrid } from '../systems/inventory/InventoryGrid';
 import { BEST_TOOL_NAME, toolEffect } from '../systems/InteractionSystem';
-import { Exposure, ResourceC, StealthState, SurvivorC } from '../components';
+import { Exposure, ResourceC, StealthState, Transform, SurvivorC } from '../components';
 import type { StatusEffectId } from '../data/schema';
 import type { DayNightCycle } from '../systems/DayNightCycle';
 import type { SurvivalStatusManager } from '../systems/SurvivalStatusManager';
@@ -62,6 +63,7 @@ export class HUD {
     this.unsubscribe.push(
       events.on('crafting:completed', ({ recipeId }) => this.toast(`Crafted ${recipeId.replace(/_/g, ' ')}`)),
       events.on('crafting:failed', ({ reason }) => this.toast(`Can't craft: ${reason.replace(/-/g, ' ')}`, true)),
+      events.on('ui:toast', ({ text, warn }) => this.toast(text, warn)),
       events.on('creature:hit', ({ killed }) => {
         this.hitMarker(killed);
         if (killed) this.toast('Killed! Hold E on the body for meat and hide');
@@ -95,6 +97,10 @@ export class HUD {
     const exp = world.get(player, Exposure);
     const felt = exp ? this.survival.feltTemperature(s, exp) : v.bodyTemp;
     this.el['temp']!.textContent = `Body ${v.bodyTemp.toFixed(1)}°C · feels ${felt.toFixed(0)}°C`;
+    // GPS (carried anywhere): coordinates under the clock.
+    const hasGps = s.hotbar.some((x) => x?.item === 'gps') || s.inventory.placements.some((x) => x.stack.item === 'gps');
+    const tp = world.get(player, Transform)?.position;
+    if (hasGps && tp) this.el['clock']!.textContent += ` · GPS ${tp.x.toFixed(0)}, ${tp.z.toFixed(0)}`;
     this.el['temp']!.classList.toggle('danger', v.bodyTemp < 35.5 || v.bodyTemp > 38.8);
 
     this.el['effects']!.innerHTML = s.effects
@@ -128,7 +134,7 @@ export class HUD {
       const best = BEST_TOOL_NAME[r.requiredTool] ?? 'tool';
       hint = fx?.fit === 'right' ? ` · ${best} ✓` : ` · much faster with ${/^[aeiou]/.test(best) ? 'an' : 'a'} ${best}`;
     }
-    return `Hold E — ${r.kind.replace('_', ' ')}${r.infinite ? '' : ` (${r.hitPoints}/${r.maxHitPoints})`}${hint}`;
+    return `Hold E — ${RESOURCE_LABEL[r.kind]}${r.infinite ? '' : ` (${r.hitPoints}/${r.maxHitPoints})`}${hint}`;
   }
 
   toast(text: string, warn = false): void {
@@ -156,7 +162,7 @@ export class HUD {
       <div class="pieces">${PIECE_ORDER.map((k) => `<span class="${k === b.kind ? 'on' : ''}">${PIECE_LABEL[k]}</span>`).join('')}</div>
       <div class="cost">Cost: ${cost}</div>
       <div class="${b.blockedReason ? 'reason bad' : 'reason ok'}">${b.blockedReason ?? 'Left click to build'}</div>
-      <div class="keys">R / wheel: change piece · X: demolish (½ refund) · E: door / sleep · B: exit</div>`;
+      <div class="keys">R / wheel: change piece · X: demolish (½ refund) · E: door / sleep · stairs climb the way you look · B: exit</div>`;
   }
 
   /** Brief black fade so waking up reads as time having passed. */

@@ -1,11 +1,12 @@
 import type { Entity, World } from '../core/ecs/World';
 import {
-  AIBrain, Creature, HeatSource, PlayerControlled, ResourceC, ShelterZone, SurvivorC, Transform,
+  AIBrain, Creature, HeatSource, PlayerControlled, ResourceC, Structure, SurvivorC, Transform,
   type AIState, type Blackboard, type CreatureSpecies,
 } from '../components';
+import { PLACEABLE_KINDS } from '../data/stations';
 import { ITEMS } from '../data/items';
-import type { Survivor, Vec3 } from '../data/schema';
-import { spawnCampfire, spawnCreature, spawnLeanTo, spawnPlayer } from '../entities/factories';
+import type { InventoryGridData, PlaceableKind, Survivor, Vec3 } from '../data/schema';
+import { spawnCreature, spawnPlayer, spawnStructure } from '../entities/factories';
 import type { DayNightCycle } from '../systems/DayNightCycle';
 import { parseMapConfig, type MapConfig } from '../world/MapConfig';
 import type { PopulatedWorld } from '../world/WorldPopulator';
@@ -21,21 +22,27 @@ import { spawnResource } from '../entities/factories';
  *
  * Bump SNAPSHOT_VERSION on any breaking change and add a step to migrate().
  */
-export const SNAPSHOT_VERSION = 3;
+export const SNAPSHOT_VERSION = 4;
 
 export interface WorldSnapshot {
-  version: typeof SNAPSHOT_VERSION;
+  version: 3 | typeof SNAPSHOT_VERSION;
   savedAt: number;
   map: MapConfig;
   clock: { totalHours: number };
   player: { position: Vec3; yaw: number; pitch: number; survivor: Survivor };
   /** Only resources that differ from freshly-generated: [stableId, hitPoints, respawnTimer]. */
   resources: Array<[number, number, number]>;
-  carcasses: Array<{ position: Vec3; hitPoints: number }>;
-  structures: Array<
-    | { kind: 'campfire'; position: Vec3; fuelSeconds: number; lit: boolean }
-    | { kind: 'lean_to'; position: Vec3 }
-  >;
+  carcasses: Array<{ position: Vec3; hitPoints: number; variant?: number }>;
+  /** Placed structures (v4: any placeable, with yaw, contents and fire state; v3 had only campfire/lean-to). */
+  structures: Array<{
+    kind: PlaceableKind;
+    position: Vec3;
+    yaw?: number;
+    fuelSeconds?: number;
+    lit?: boolean;
+    container?: InventoryGridData | null;
+    processing?: { recipeId: string | null; progress: number };
+  }>;
   creatures: Array<{
     species: CreatureSpecies;
     position: Vec3;
@@ -87,19 +94,20 @@ export function captureSnapshot(world: World, ctx: CaptureContext): WorldSnapsho
   for (const e of world.query(ResourceC)) {
     const r = world.require(e, ResourceC);
     if (r.kind === 'carcass' && !ctx.populated.entityToStable.has(e)) {
-      carcasses.push({ position: vec(r.position), hitPoints: r.hitPoints });
+      carcasses.push({ position: vec(r.position), hitPoints: r.hitPoints, variant: r.variant });
     }
   }
 
   const structures: WorldSnapshot['structures'] = [];
-  for (const e of world.query(HeatSource, Transform)) {
-    const h = world.require(e, HeatSource);
-    if (h.isStation === 'campfire') {
-      structures.push({ kind: 'campfire', position: vec(world.require(e, Transform).position), fuelSeconds: round(h.fuelSeconds), lit: h.lit });
-    }
-  }
-  for (const e of world.query(ShelterZone, Transform)) {
-    structures.push({ kind: 'lean_to', position: vec(world.require(e, Transform).position) });
+  for (const e of world.query(Structure, Transform)) {
+    const st = world.require(e, Structure);
+    const h = world.get(e, HeatSource);
+    structures.push({
+      kind: st.kind, position: vec(world.require(e, Transform).position), yaw: round(st.yaw),
+      container: st.container ? structuredCloneSafe(st.container) : null,
+      processing: { ...st.processing },
+      ...(h ? { fuelSeconds: round(h.fuelSeconds), lit: h.lit } : {}),
+    });
   }
 
   const creatures: WorldSnapshot['creatures'] = [];
@@ -172,6 +180,8 @@ function migrate(raw: unknown): unknown {
   // them from their seed now gives different terrain, so resource IDs and
   // positions would no longer match. They can't be loaded faithfully.
   if (v < 3) throw new SnapshotError('Save is from before the desert island update and can no longer be loaded.');
+  // v3 → v4: structures gained yaw/contents (all optional), carcasses a species
+  // variant, and the bag grew to 10×6. Nothing to rewrite here; see applySnapshot.
   return raw;
 }
 
@@ -214,8 +224,15 @@ export function validateSnapshot(raw: unknown): WorldSnapshot {
   arr(o['carcasses'], 'carcasses').forEach((c, i) => vec3(obj(c, `carcasses[${i}]`)['position'], `carcasses[${i}].position`));
   arr(o['structures'], 'structures').forEach((st, i) => {
     const so = obj(st, `structures[${i}]`);
-    if (so['kind'] !== 'campfire' && so['kind'] !== 'lean_to') throw new SnapshotError(`structures[${i}].kind is invalid`);
+    if (!PLACEABLE_KINDS.includes(so['kind'] as PlaceableKind)) throw new SnapshotError(`structures[${i}].kind is invalid`);
     vec3(so['position'], `structures[${i}].position`);
+    if (so['container'] != null) {
+      const c = obj(so['container'], `structures[${i}].container`);
+      arr(c['placements'], `structures[${i}].container.placements`).forEach((pl) => {
+        const it = String(obj(obj(pl, 'placement')['stack'], 'stack')['item']);
+        if (!(it in ITEMS)) throw new SnapshotError(`Unknown item "${it}" in a ${String(so['kind'])}.`);
+      });
+    }
   });
   arr(o['creatures'], 'creatures').forEach((c, i) => {
     const co = obj(c, `creatures[${i}]`);
@@ -227,13 +244,13 @@ export function validateSnapshot(raw: unknown): WorldSnapshot {
     arr(bb['waypoints'], `creatures[${i}].blackboard.waypoints`);
   });
 
-  const KINDS = new Set(['foundation', 'wall', 'doorway', 'ceiling', 'bed']);
+  const KINDS = new Set(['foundation', 'wall', 'doorway', 'ceiling', 'stairs', 'bed']);
   const SIDES = new Set(['n', 'e', 's', 'w']);
   arr(o['buildings'] ?? [], 'buildings').forEach((b, i) => {
     const bo = obj(b, `buildings[${i}]`);
     if (!KINDS.has(String(bo['kind']))) throw new SnapshotError(`buildings[${i}].kind is invalid`);
     for (const k of ['i', 'j', 'y']) num(bo[k], `buildings[${i}].${k}`);
-    if ((bo['kind'] === 'wall' || bo['kind'] === 'doorway' || bo['kind'] === 'bed') && !SIDES.has(String(bo['side']))) {
+    if ((bo['kind'] === 'wall' || bo['kind'] === 'doorway' || bo['kind'] === 'bed' || bo['kind'] === 'stairs') && !SIDES.has(String(bo['side']))) {
       throw new SnapshotError(`buildings[${i}].side is invalid`);
     }
   });
@@ -275,18 +292,18 @@ export function applySnapshot(world: World, s: WorldSnapshot, populated: Populat
   }
 
   for (const c of s.carcasses) {
-    const e = spawnResource(world, 'carcass', c.position);
+    const e = spawnResource(world, 'carcass', c.position, c.variant ?? -1);
     world.require(e, ResourceC).hitPoints = c.hitPoints;
     populated.resourceIndex.insert(e, c.position.x, c.position.z);
   }
 
   for (const st of s.structures) {
-    if (st.kind === 'campfire') {
-      const e = spawnCampfire(world, st.position, st.fuelSeconds);
-      world.require(e, HeatSource).lit = st.lit;
-    } else {
-      spawnLeanTo(world, st.position);
-    }
+    const opts: Parameters<typeof spawnStructure>[3] = { yaw: st.yaw ?? 0 };
+    if (st.container !== undefined) opts.container = st.container;
+    if (st.lit !== undefined) opts.lit = st.lit;
+    if (st.fuelSeconds !== undefined) opts.fuelSeconds = st.fuelSeconds;
+    const e = spawnStructure(world, st.kind, st.position, opts);
+    if (st.processing) world.require(e, Structure).processing = { ...st.processing };
   }
 
   for (const c of s.creatures) {
@@ -305,6 +322,9 @@ export function applySnapshot(world: World, s: WorldSnapshot, populated: Populat
 
   const player = spawnPlayer(world, s.player.position, s.player.survivor.name);
   const survivor: Survivor = { ...s.player.survivor, id: player };
+  // The bag grew from 8×5 to 10×6: existing placements still fit as they are.
+  survivor.inventory.cols = Math.max(survivor.inventory.cols, 10);
+  survivor.inventory.rows = Math.max(survivor.inventory.rows, 6);
   world.add(player, SurvivorC, survivor);
   const pc = world.require(player, PlayerControlled);
   pc.yaw = s.player.yaw;

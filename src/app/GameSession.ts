@@ -1,21 +1,27 @@
 import * as THREE from 'three';
 import type { AssetLoader } from '../assets/AssetLoader';
-import { HeatSource, PlayerControlled, ResourceC, SurvivorC, Transform } from '../components';
+import { HeatSource, PlayerControlled, ResourceC, Structure, SurvivorC, Transform } from '../components';
 import { World, type Entity } from '../core/ecs/World';
 import { EventBus } from '../core/EventBus';
 import { GameLoop } from '../core/GameLoop';
 import type { InputManager } from '../core/Input';
-import { spawnCampfire, spawnLeanTo, spawnPlayer } from '../entities/factories';
+import { spawnPlayer, spawnStructure } from '../entities/factories';
+import { STRUCTURES } from '../data/stations';
+import { itemDef } from '../data/items';
+import type { PlaceableKind } from '../data/schema';
 import { applySnapshot, captureSnapshot, type WorldSnapshot } from '../persistence/WorldSnapshot';
 import { CombatSystem } from '../physics/CombatSystem';
 import { PhysicsSystem } from '../physics/PhysicsSystem';
 import { PLAYER_SHAPE, PhysicsBody, PhysicsWorld } from '../physics/PhysicsWorld';
+import { placementSpot } from '../physics/Placement';
+import { StructurePhysics } from '../physics/StructurePhysics';
+import { obstacleRadius } from '../systems/ai/nav/NavGrid';
 import { CullingSystem } from '../render/CullingSystem';
 import { BuildingVisuals } from '../render/BuildingVisuals';
 import { BuildingPhysics } from '../physics/BuildingPhysics';
 import { BuildingGrid } from '../systems/building/BuildingGrid';
 import { BuildingNav } from '../systems/building/BuildingNav';
-import { BuildingSystem } from '../systems/building/BuildingSystem';
+import { BuilderC, BuildingSystem } from '../systems/building/BuildingSystem';
 import { HitFlashSystem } from '../render/HitFlashSystem';
 import { CreatureAnimationSystem } from '../render/CreatureAnimationSystem';
 import { RenderObject, type Renderer } from '../render/Renderer';
@@ -36,6 +42,8 @@ import { PlayerAnimationSystem } from '../systems/player/PlayerAnimationSystem';
 import { PlayerControlSystem } from '../systems/PlayerControlSystem';
 import { SurvivalSystem } from '../systems/SurvivalSystem';
 import { SleepSystem } from '../systems/SleepSystem';
+import { StationSystem } from '../systems/StationSystem';
+import { StructureInteraction } from '../systems/StructureInteraction';
 import { HUD } from '../ui/HUD';
 import { InventoryUI } from '../ui/InventoryUI';
 import type { MapConfig } from '../world/MapConfig';
@@ -85,6 +93,11 @@ export class GameSession {
   private readonly building: BuildingSystem;
   private readonly buildingPhysics: BuildingPhysics;
   private readonly buildingNav: BuildingNav;
+  private readonly stations: StationSystem;
+  private readonly structures: StructureInteraction;
+  private structurePhysics: StructurePhysics | null = null;
+  /** Structure the player pressed E on; App opens the inventory with it. */
+  private openRequest: Entity | null = null;
 
   /** Async factory: world visuals are built time-sliced and the build can be aborted. */
   static async create(d: SessionDeps): Promise<GameSession> {
@@ -163,6 +176,15 @@ export class GameSession {
     // Adapters are listening now, so restored pieces get colliders and nav blocking.
     for (const piece of d.snapshot?.buildings ?? []) this.building.spawn(world, piece);
 
+    this.stations = new StationSystem(events);
+    this.structures = new StructureInteraction(d.input, events, () => {
+      const b = world.get(this.player, BuilderC);
+      return !!b?.active || this.building.lookingAt !== null;
+    });
+    this.interaction.blocked = () => this.structures.focused !== null;
+    events.on('structure:open', ({ entity }) => (this.openRequest = entity));
+    this.structurePhysics = new StructurePhysics(world, this.physics, events);
+
     const environment = new EnvironmentSystem(this.cycle, (feet) => this.buildings.shelterAt(feet));
     this.loop = new GameLoop(world, { onRender: this.onRender });
     const noise = new NoiseBus();
@@ -170,13 +192,15 @@ export class GameSession {
       // per-frame, in order: input → intent → action requests → animation
       .addSystem(new PlayerControlSystem(d.input))
       .addSystem(this.building)
+      .addSystem(this.structures)
       .addSystem(this.interaction)
       .addSystem(new CombatSystem(this.physics, d.renderer.scene, d.input, d.renderer.camera, this.populated.resourceIndex, events,
         (x, z) => this.populated.nav.isWalkable(x, z)))
       .addSystem(new PlayerAnimationSystem(events))
       // fixed-step, in order:
+      .addSystem(this.stations)
       .addSystem(environment)
-      .addSystem(new PhysicsSystem(this.physics, terrain.cfg.waterLevel))
+      .addSystem(new PhysicsSystem(this.physics, terrain.cfg.waterLevel, (x, z, feet) => this.buildings.stairsSurfaceAt(x, z, feet)))
       .addSystem(this.aiLod) //          decides who is simulated this tick…
       .addSystem(new PerceptionSystem(this.cycle, noise, this.physics.lineOfSight, events)) // …then they sense…
       .addSystem(new AISystem({ //       …then they think and move along flow fields
@@ -192,11 +216,12 @@ export class GameSession {
       .addSystem(survival);
 
     // Beds: E on a bed at night fast-forwards to morning through these systems.
-    new SleepSystem(world, events, this.cycle, [environment, this.interaction, this.crafting, survival]);
+    new SleepSystem(world, events, this.cycle, [this.stations, environment, this.interaction, this.crafting, survival]);
 
     this.hud = new HUD(d.uiContainer, events, this.cycle, survival.manager);
     this.inventory = new InventoryUI(
       d.uiContainer, world, () => this.player, this.crafting, survival.manager, events, (kind) => this.placeStructure(kind),
+      this.stations, (e) => this.pickUpStructure(e),
     );
   }
 
@@ -233,7 +258,7 @@ export class GameSession {
     const set = (e: Entity, solid: boolean): void => {
       const idx = this.populated.entityToStable.get(e);
       const prop = idx !== undefined ? terrain.props[idx] : undefined;
-      if (idx === undefined || !prop || (prop.kind !== 'tree' && prop.kind !== 'rock')) return;
+      if (idx === undefined || !prop || obstacleRadius(prop) === 0) return;
       if (cleared.has(idx) === !solid) return;
       if (solid) cleared.delete(idx);
       else cleared.add(idx);
@@ -254,8 +279,16 @@ export class GameSession {
     return this.inventory.isOpen;
   }
 
-  setInventoryOpen(open: boolean): void {
-    this.inventory.toggle(open);
+  /** E was pressed on a structure: the App opens the inventory showing it. */
+  takeOpenRequest(): Entity | null {
+    const e = this.openRequest;
+    this.openRequest = null;
+    return e !== null && this.world.get(e, Structure) ? e : null;
+  }
+
+  setInventoryOpen(open: boolean, container?: Entity): void {
+    if (open && container !== undefined) this.inventory.openContainer(container);
+    else this.inventory.toggle(open);
     const anim = this.world.get(this.player, PlayerAnimC);
     if (anim) anim.uiBlocked = open; // tool is put away while the bag is open
   }
@@ -278,6 +311,7 @@ export class GameSession {
     this.loop.dispose(); // also disposes systems (BuildingVisuals, HitFlash…)
     this.buildingPhysics.dispose();
     this.buildingNav.dispose();
+    this.structurePhysics?.dispose();
     this.hud.dispose();
     this.inventory.dispose();
     this.d.renderer.resetScene();
@@ -290,23 +324,46 @@ export class GameSession {
     if (this.disposed) return;
     this.d.onFrame?.(this, dt);
     this.animateFires(dt);
-    const prompt = this.building.prompt() ?? this.hud.promptFor(this.world, this.interaction.focused, this.player);
+    this.inventory.frame();
+    const prompt = this.building.prompt() ?? this.structures.prompt(this.world) ?? this.hud.promptFor(this.world, this.interaction.focused, this.player);
     this.hud.update(this.world, this.player, dt, this.loop, prompt, this.crafting.progress(this.player));
     this.d.renderer.render();
     this.d.input.endFrame();
   };
 
-  private placeStructure(kind: 'campfire' | 'lean_to'): boolean {
+  /**
+   * Put a structure down ~2 m in front of the player, on whatever is there:
+   * the ground, or a foundation/floor of a house (it used to be placed at
+   * terrain height, i.e. buried inside the floor). Returns an error to show,
+   * or null on success.
+   */
+  private placeStructure(kind: PlaceableKind): string | null {
     const pc = this.world.require(this.player, PlayerControlled);
-    const p = this.world.require(this.player, Transform).position;
-    const x = p.x - Math.sin(pc.yaw) * 2.2;
-    const z = p.z - Math.cos(pc.yaw) * 2.2;
-    if (!this.populated.nav.isWalkable(x, z)) return false; // not into a trunk or the lake
-    const pos = { x, y: sampleHeight(this.d.bundle.terrain, x, z), z };
-    const e = kind === 'campfire' ? spawnCampfire(this.world, pos) : spawnLeanTo(this.world, pos);
+    const size = STRUCTURES[kind].size;
+    const terrain = this.d.bundle.terrain;
+    const spot = placementSpot(this.physics, {
+      feet: this.world.require(this.player, Transform).position, yaw: pc.yaw, radius: Math.max(size.hx, size.hz),
+      heightAt: (x, z) => sampleHeight(terrain, x, z), isWalkable: (x, z) => this.populated.nav.isWalkable(x, z),
+      waterLevel: terrain.cfg.waterLevel,
+    });
+    if ('error' in spot) return spot.error;
+    const e = spawnStructure(this.world, kind, spot, { yaw: pc.yaw });
     bindEntityVisuals(this.world, this.d.renderer.scene, this.d.assets);
-    this.world.require(e, RenderObject).object.rotation.y = pc.yaw;
-    return true;
+    this.events.emit('structure:placed', { entity: e });
+    return null;
+  }
+
+  /** Pick a structure back up as its kit (it must be empty). */
+  private pickUpStructure(e: Entity): string | null {
+    const st = this.world.get(e, Structure);
+    if (!st) return null;
+    if (st.container && st.container.placements.length > 0) return 'Empty it first';
+    const def = STRUCTURES[st.kind];
+    if (this.crafting.inventoryOf(this.world, this.player).add(def.kit, 1) > 0) return `No room for the ${itemDef(def.kit).name}`;
+    this.events.emit('structure:removed', { entity: e });
+    this.world.destroy(e);
+    this.events.emit('inventory:changed', { entity: this.player });
+    return null;
   }
 
   private animateFires(dt: number): void {

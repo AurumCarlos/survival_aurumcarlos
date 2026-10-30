@@ -7,7 +7,9 @@ import { AIBrain, Creature, PlayerControlled, SurvivorC, Transform } from '../sr
 import { World } from '../src/core/ecs/World';
 import { EventBus } from '../src/core/EventBus';
 import { GameLoop, type FrameScheduler } from '../src/core/GameLoop';
-import { spawnCreature, spawnLeanTo, spawnPlayer } from '../src/entities/factories';
+import { spawnCreature, spawnLeanTo, spawnPlayer, spawnStructure } from '../src/entities/factories';
+import { placementSpot } from '../src/physics/Placement';
+import { StructurePhysics } from '../src/physics/StructurePhysics';
 import { BuildingPhysics } from '../src/physics/BuildingPhysics';
 import { PhysicsSystem } from '../src/physics/PhysicsSystem';
 import { PLAYER_SHAPE, PhysicsBody, PhysicsWorld } from '../src/physics/PhysicsWorld';
@@ -177,6 +179,84 @@ async function main(): Promise<void> {
     const s2 = w2.require(p2, SurvivorC);
     check('sleeping outside on a cold night costs health (or your life)', !s2.alive || s2.vitals.health < 100, `health ${s2.vitals.health.toFixed(0)}, alive ${s2.alive}`);
     void spawnLeanTo;
+  }
+
+  console.log('\n── Campfire / structures placed on buildings ──');
+  {
+    const { world, physics, player } = setup();
+    const grid = new BuildingGrid({ heightAt: () => 1, staticBlocked: () => false, waterLevel: -5 });
+    const events = new EventBus();
+    const cam = { position: { x: 0, y: 0, z: 0 }, getWorldDirection: (v: { set: (a: number, b: number, c: number) => unknown }) => v.set(0, 0, -1) };
+    new BuildingPhysics(grid, physics, cam as never, { x: 0, y: 0, z: 0, set() { return this; } } as never, events);
+    let id = 300;
+    const put = (c: Candidate): Piece => {
+      const p = grid.insert({ ...c, id: id++ });
+      events.emit('building:placed', { entity: p.id });
+      return p;
+    };
+    for (const [i, j] of [[0, -1], [0, -2], [1, -1], [1, -2]] as const) put({ kind: 'foundation', i, j, y: 1.6 });
+    put({ kind: 'wall', i: 0, j: -2, y: 1.6, side: 'n' });
+    const q = (feet: { x: number; y: number; z: number }, yaw = 0) => placementSpot(physics, {
+      feet, yaw, radius: 0.6, heightAt: () => 1, isWalkable: () => true, waterLevel: -5,
+    });
+    const onFloor = q({ x: 1.5, y: 1.6, z: -1.2 });
+    check('a campfire put down on a foundation sits ON it (not buried at ground level)', !('error' in onFloor) && Math.abs(onFloor.y - 1.6) < 0.05,
+      'error' in onFloor ? onFloor.error : `y ${onFloor.y.toFixed(2)} (floor 1.60, ground 1.00)`);
+    const ground = q({ x: 1.5, y: 1, z: 3 });
+    check('on open ground it sits on the terrain', !('error' in ground) && Math.abs(ground.y - 1) < 0.05);
+    const wall = q({ x: 1.5, y: 1.6, z: -4.6 });
+    check('never pushed through a wall', 'error' in wall || wall.z > -6 + 0.5, 'error' in wall ? wall.error : `z ${wall.z.toFixed(2)} (wall at −6)`);
+
+    // A storage box is solid.
+    const box = spawnStructure(world, 'storage_box', { x: 0, y: 1, z: 4 }, { yaw: 0 });
+    new StructurePhysics(world, physics, events);
+    void box;
+    const body = world.require(player, PhysicsBody).body;
+    body.position.set(0, 1 + PLAYER_SHAPE.height / 2 + 0.05, 7);
+    body.velocity.set(0, 0, 0);
+    world.require(player, Transform).position = { x: 0, y: 1, z: 7 };
+    const w = await walk(physics, world, player, 0, -3, 2);
+    check('a storage box blocks the player', w.dz > -3.0 + 0.2 && w.dz < -1.6, `moved ${w.dz.toFixed(2)} m toward it`);
+  }
+
+  console.log('\n── Stairs: up one storey and back down ──');
+  {
+    const { world, physics, player } = setup();
+    const grid = new BuildingGrid({ heightAt: () => 1, staticBlocked: () => false, waterLevel: -5 });
+    const events = new EventBus();
+    const cam = { position: { x: 0, y: 0, z: 0 }, getWorldDirection: (v: { set: (a: number, b: number, c: number) => unknown }) => v.set(0, 0, -1) };
+    new BuildingPhysics(grid, physics, cam as never, { x: 0, y: 0, z: 0, set() { return this; } } as never, events);
+    let id = 500;
+    const put = (c: Candidate): void => {
+      const p = grid.insert({ ...c, id: id++ });
+      events.emit('building:placed', { entity: p.id });
+    };
+    // Foundations at x 0..9 (cells 0..2), stairs in cell 1 climbing east, landing (ceiling) on cell 2 at +3 m.
+    for (let i = 0; i <= 2; i++) put({ kind: 'foundation', i, j: 0, y: 1.4 });
+    put({ kind: 'stairs', i: 1, j: 0, y: 1.4, side: 'e' });
+    put({ kind: 'ceiling', i: 2, j: 0, y: 4.4 });
+    const body = world.require(player, PhysicsBody).body;
+    body.position.set(1.5, 1.4 + PLAYER_SHAPE.height / 2 + 0.05, 1.5);
+    world.require(player, Transform).position = { x: 1.5, y: 1.4, z: 1.5 };
+    const stairsAt = (x: number, z: number, f: number) => grid.stairsSurfaceAt(x, z, f);
+    const walkS = (vx: number, seconds: number): { x: number; y: number } => {
+      const loop = new GameLoop(world, { scheduler: manual() });
+      loop.addSystem({ name: 'intent', fixedUpdate: () => { const pc = world.require(player, PlayerControlled); pc.desiredVelocity.x = vx; pc.desiredVelocity.z = 0; } });
+      loop.addSystem(new PhysicsSystem(physics, -5, stairsAt));
+      for (let t = 0; t <= seconds * 1000; t += 1000 / 60) loop.tick(t);
+      const p = world.require(player, Transform).position;
+      return { x: p.x, y: p.y };
+    };
+    const up = walkS(4, 1.7);
+    check('walking into the stairs climbs to the landing one storey up', up.y > 4.3 && up.x > 6.5 && up.x < 9, `x ${up.x.toFixed(2)}, feet ${up.y.toFixed(2)} (landing 4.40)`);
+    const idle = walkS(0, 1);
+    check('standing still on the landing: no sliding', Math.abs(idle.x - up.x) < 0.1 && idle.y > 4.3);
+    // Step back onto the flight and stop halfway: must not slide down.
+    const half = walkS(-4, 1.2);
+    const stay = walkS(0, 1.5);
+    check('standing still halfway up: stays put', Math.abs(stay.x - half.x) < 0.1 && Math.abs(stay.y - half.y) < 0.1, `x ${half.x.toFixed(2)}→${stay.x.toFixed(2)}, y ${half.y.toFixed(2)}→${stay.y.toFixed(2)}`);
+    const down = walkS(-4, 2);
+    check('walking back down returns to the ground floor', down.y < 1.6 && down.x < 3, `x ${down.x.toFixed(2)}, feet ${down.y.toFixed(2)}`);
   }
 
   console.log('\n── More animals ──');

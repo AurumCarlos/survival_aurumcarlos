@@ -1,3 +1,4 @@
+import { itemDef } from '../../data/items';
 import type { Entity, System, World } from '../../core/ecs/World';
 import type { EventBus } from '../../core/EventBus';
 import {
@@ -126,9 +127,11 @@ const chase = new Action<AIServices>('chase', (c) => {
     if (k.attackTimer === 0) {
       k.attackTimer = k.attackCooldown;
       const s = c.world.require(c.services.player, SurvivorC);
-      s.vitals.health = Math.max(0, s.vitals.health - k.attackDamage);
+      // Armour absorbs part of the bite (Flak halves it) and makes bleeding rarer.
+      const armor = s.equipped.body ? (itemDef(s.equipped.body.item).wearable?.armor ?? 0) : 0;
+      s.vitals.health = Math.max(0, s.vitals.health - k.attackDamage * (1 - armor));
       // Bites have a chance to cause bleeding; the status manager owns the effect.
-      if (rand(c.bb) < 0.35) c.services.survival.applyEffect(s, 'bleeding', 20, 'combat');
+      if (rand(c.bb) < 0.35 * (1 - armor)) c.services.survival.applyEffect(s, 'bleeding', 20, 'combat');
     }
     return 'running';
   }

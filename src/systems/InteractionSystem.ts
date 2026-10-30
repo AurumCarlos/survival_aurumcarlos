@@ -60,7 +60,7 @@ export function toolEffect(r: Resource, held: ItemStack | null): ToolEffect | nu
 }
 
 /** Display name of the tool that suits a resource best. */
-export const BEST_TOOL_NAME: Readonly<Record<string, string>> = { axe: 'axe', pickaxe: 'pickaxe', blade: 'spear' };
+export const BEST_TOOL_NAME: Readonly<Record<string, string>> = { axe: 'axe', pickaxe: 'pickaxe', blade: 'spear', sickle: 'sickle' };
 
 /**
  * One harvest action (one swing / one pick). Pure function over plain data.
@@ -82,11 +82,17 @@ export function harvest(s: Survivor, inv: InventoryGrid, r: Resource, rng: () =>
   }
   const mult = fx.yieldMult * s.modifiers.gatherSpeed;
 
+  const heldTool = held ? itemDef(held.item).tool : undefined;
   for (const y of r.yields) {
     if (rng() > y.chance) continue;
     const base = y.min + Math.floor(rng() * (y.max - y.min + 1));
+    // Per-yield preference (ARK-style): thatch comes off trees by hand, not
+    // with the axe; a sickle multiplies fiber and berries.
+    let m = mult;
+    if (y.favour === 'hands') m = (fx.fit === 'right' ? 0.4 : 1.5) * s.modifiers.gatherSpeed;
+    else if (y.favour && heldTool?.tags.includes(y.favour)) m = heldTool.gatherMultiplier * s.modifiers.gatherSpeed;
     // Fractional yields are resolved stochastically so 0.5× isn't always 0.
-    const raw = base * mult;
+    const raw = base * m;
     const qty = Math.floor(raw) + (rng() < raw - Math.floor(raw) ? 1 : 0);
     if (qty <= 0) continue;
     const left = inv.add(y.item, qty);
@@ -126,6 +132,8 @@ export class InteractionSystem implements System {
   private pendingImpacts = 0;
   /** Closest valid target this frame, for the HUD prompt. */
   focused: Entity | null = null;
+  /** While true (a box or station is targeted), E does not harvest. */
+  blocked: () => boolean = () => false;
 
   constructor(
     private readonly input: InputManager,
@@ -148,7 +156,7 @@ export class InteractionSystem implements System {
     const pc = world.require(player, PlayerControlled);
     const p = world.require(player, Transform).position;
 
-    this.focused = this.findTarget(world, p.x, p.z, pc.yaw);
+    this.focused = this.blocked() ? null : this.findTarget(world, p.x, p.z, pc.yaw);
 
     // Apply impacts from the previous frame's animation step.
     for (; this.pendingImpacts > 0; this.pendingImpacts--) {

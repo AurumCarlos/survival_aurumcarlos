@@ -292,7 +292,9 @@ export class App {
   private readonly onFrame = (s: GameSession): void => {
     const state = this.machine.state;
     if (state === 'playing') {
-      if (this.input.wasPressedRaw('inventory')) this.toggleInventory(s, !s.isInventoryOpen);
+      const box = s.takeOpenRequest();
+      if (box !== null && !s.isInventoryOpen) this.toggleInventory(s, true, box);
+      else if (this.input.wasPressedRaw('inventory')) this.toggleInventory(s, !s.isInventoryOpen);
       else if (this.input.wasPressedRaw('pause')) {
         // Esc normally arrives as a pointer-lock exit; this path covers playing
         // without lock (lock refused) and closing the inventory with Esc.
@@ -306,10 +308,10 @@ export class App {
     }
   };
 
-  private toggleInventory(s: GameSession, open: boolean): void {
+  private toggleInventory(s: GameSession, open: boolean, container?: number): void {
     if (s.isInventoryOpen === open) return;
     this.lifecycle.uiOwnsPointer = open;
-    s.setInventoryOpen(open);
+    s.setInventoryOpen(open, container);
     this.input.setGameplayEnabled(!open);
     if (open) document.exitPointerLock();
     else this.input.requestPointerLock();

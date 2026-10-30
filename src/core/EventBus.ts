@@ -31,6 +31,15 @@ export interface GameEvents {
   'creature:hit': { entity: Entity; amount: number; killed: boolean };
   /** An animation clip reached its impact frame: apply the gameplay effect now. */
   'player:action-impact': { entity: Entity; action: 'swing' | 'harvest' | 'throw' };
+  /** A placed structure's contents or fire changed (UI refresh). */
+  'structure:changed': { entity: Entity };
+  /** E on a storage box / station: open its inventory panel. */
+  'structure:open': { entity: Entity };
+  'structure:placed': { entity: Entity };
+  /** Emitted before the entity is destroyed. */
+  'structure:removed': { entity: Entity };
+  /** Short message for the player. */
+  'ui:toast': { text: string; warn?: boolean };
 }
 
 export type DeathCause = 'starvation' | 'dehydration' | 'hypothermia' | 'hyperthermia' | 'combat' | 'fall';

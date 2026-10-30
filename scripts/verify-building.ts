@@ -17,6 +17,8 @@ import { MOVEMENT } from '../src/systems/PlayerControlSystem';
 import { parseMapConfig, toTerrainConfig } from '../src/world/MapConfig';
 import { generateTerrain, sampleHeight, ISLAND } from '../src/world/TerrainGenerator';
 import { FIR_HEIGHT, FIR_TRUNK_RADIUS } from '../src/systems/ai/nav/NavGrid';
+import { SPECIES, TREE_SPECIES, treeSpecies } from '../src/world/TreeSpecies';
+import { TREE_HEIGHT_STRETCH } from '../src/world/TerrainGenerator';
 import { TerrainService } from '../src/world/TerrainService';
 import { populateResources } from '../src/world/WorldPopulator';
 import { Creature } from '../src/components';
@@ -47,7 +49,7 @@ async function main(): Promise<void> {
     }
     // Walk inward from the sea along 90 rays: right after the waterline there
     // must be ≥ 10 m of flat sand (within 0.8 m of sea level) with no trees.
-    const trees = t.props.filter((p) => p.kind === 'tree');
+    const trees = t.props.filter((p) => p.kind === 'tree' && treeSpecies(p.variant) !== SPECIES.palm); // a few palms on the upper beach are fine
     let beachOk = 0, minBeach = Infinity;
     for (let k = 0; k < 90; k++) {
       const a = (k / 90) * Math.PI * 2, c = Math.cos(a), sn = Math.sin(a);
@@ -71,7 +73,7 @@ async function main(): Promise<void> {
     const dense = trees.filter((p) => Math.hypot(p.position.x, p.position.z) < forestR).length / (Math.PI * forestR * forestR) * 100;
     console.log(`   ${size} m: ${((land / t.heights.length) * 100).toFixed(0)} % land, highest point ${(maxH - W).toFixed(1)} m, narrowest beach ${minBeach.toFixed(1)} m, ${dense.toFixed(1)} trees / 100 m² inland`);
     check(`${size} m: open sea all around the map edge`, edgeWater);
-    check(`${size} m: flat tree-free beach ≥ 10 m wide all the way round`, beachOk === 90, `${beachOk}/90 directions`);
+    check(`${size} m: flat beach ≥ 10 m wide all the way round, no forest trees on it`, beachOk === 90, `${beachOk}/90 directions`);
     check(`${size} m: low relief (< 8 m above the sea)`, maxH - W < 8);
     check(`${size} m: dense forest inland (≥ 5 firs per 100 m²)`, dense >= 5);
     const sp = t.spawn;
@@ -84,10 +86,31 @@ async function main(): Promise<void> {
   }
   {
     const t = generateTerrain(toTerrainConfig(parseMapConfig({ size: 256, seed: 777 })));
-    const heights = t.props.filter((p) => p.kind === 'tree').map((p) => p.scale * FIR_HEIGHT);
-    const adult = heights.filter((h) => h >= 12);
-    check('firs at real scale: mature 12–20 m, young 5–10 m', Math.max(...heights) <= 20 && Math.min(...heights) >= 5.5 && adult.length > heights.length * 0.7,
-      `${Math.min(...heights).toFixed(1)}–${Math.max(...heights).toFixed(1)} m, trunk Ø ${(FIR_TRUNK_RADIUS * 2).toFixed(2)} m at 16 m`);
+    const firs = t.props.filter((p) => p.kind === 'tree' && treeSpecies(p.variant) === 0);
+    const heights = firs.map((p) => p.scale * FIR_HEIGHT * TREE_HEIGHT_STRETCH);
+    const adult = heights.filter((h) => h >= 14);
+    check('firs a bit taller than before: mature 15–25 m, young 7–12 m', Math.max(...heights) <= 25.5 && Math.min(...heights) >= 6.9 && adult.length > heights.length * 0.7,
+      `${Math.min(...heights).toFixed(1)}–${Math.max(...heights).toFixed(1)} m, trunk Ø ${(FIR_TRUNK_RADIUS * 2).toFixed(2)} m at scale 1`);
+    // Species mix: several species, none above ~70 %, and patchy (neighbours agree more often than chance).
+    const trees = t.props.filter((p) => p.kind === 'tree');
+    const counts = new Map<number, number>();
+    for (const p of trees) counts.set(treeSpecies(p.variant), (counts.get(treeSpecies(p.variant)) ?? 0) + 1);
+    const shares = [...counts.entries()].sort((a, b) => a[0] - b[0]).map(([k, n]) => `${TREE_SPECIES[k]!.name} ${Math.round((n / trees.length) * 100)}%`);
+    let same = 0, pairs = 0, chance = 0;
+    for (const n of counts.values()) chance += (n / trees.length) ** 2;
+    for (let a = 0; a < trees.length; a += 7) {
+      for (let b = a + 1; b < Math.min(trees.length, a + 200); b++) {
+        if (Math.hypot(trees[a]!.position.x - trees[b]!.position.x, trees[a]!.position.z - trees[b]!.position.z) > 5) continue;
+        pairs++;
+        if (treeSpecies(trees[a]!.variant) === treeSpecies(trees[b]!.variant)) same++;
+      }
+    }
+    check('≥ 6 tree species (incl. palms), none above 70 %', counts.size >= 6 && Math.max(...counts.values()) < trees.length * 0.7, shares.join(', '));
+    check('mixed but not uniform: neighbours share a species more than chance', same / pairs > chance * 1.25 && same / pairs < 0.95,
+      `${Math.round((same / pairs) * 100)}% vs ${Math.round(chance * 100)}% by chance`);
+    const kinds = new Set(t.props.map((p) => p.kind));
+    const missing = ['metal_rock', 'obsidian_rock', 'crystal', 'oil_rock', 'shell_bed', 'salt_deposit', 'rare_flower', 'fish_shoal', 'mushroom'].filter((k) => !kinds.has(k as never));
+    check('every ARK resource node exists on the island', missing.length === 0, missing.length ? `missing ${missing.join(', ')}` : '');
     check('terrain resolution 1.33 m per quad', Math.abs(t.cfg.size / t.cfg.resolution - 4 / 3) < 1e-9);
   }
   check('island shape constants sane', ISLAND.radius + ISLAND.wobble < 0.9);
@@ -250,7 +273,7 @@ async function main(): Promise<void> {
     check('buildings saved with door state', snap.buildings.length === 2 && snap.buildings.some((b) => b.kind === 'doorway' && b.open === true && b.side === 'e'));
     let err = '';
     try {
-      parseSnapshot(json.replace('"version":3', '"version":2'));
+      parseSnapshot(json.replace('"version":4', '"version":2'));
     } catch (e) {
       err = (e as Error).message;
     }

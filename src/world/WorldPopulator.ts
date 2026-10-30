@@ -9,7 +9,10 @@ import { mulberry32 } from './Noise';
 import type { TerrainBundle } from './TerrainCodec';
 import { sampleHeight } from './TerrainGenerator';
 
-const HARVESTABLE: ReadonlySet<string> = new Set<ResourceKind>(['tree', 'rock', 'berry_bush', 'fiber_plant', 'water_source']);
+const HARVESTABLE: ReadonlySet<string> = new Set<ResourceKind>([
+  'tree', 'rock', 'berry_bush', 'fiber_plant', 'water_source', 'mushroom', 'metal_rock', 'obsidian_rock', 'crystal',
+  'oil_rock', 'shell_bed', 'salt_deposit', 'rare_flower', 'fish_shoal',
+]);
 
 export interface PopulatedWorld {
   /** Harvestables indexed by position for the interaction system. */

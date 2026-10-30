@@ -210,7 +210,7 @@ async function main(): Promise<void> {
 
     let e1 = '', e2 = '', e3 = '';
     try { parseSnapshot(json.slice(0, json.length / 2)); } catch (e) { e1 = e instanceof SnapshotError ? e.message : 'wrong type'; }
-    try { parseSnapshot(json.replace('"version":3', '"version":99')); } catch (e) { e2 = (e as Error).message; }
+    try { parseSnapshot(json.replace('"version":4', '"version":99')); } catch (e) { e2 = (e as Error).message; }
     try { parseSnapshot(json.replace('"species":"wolf"', '"species":"dragon"')); } catch (e) { e3 = (e as Error).message; }
     check('truncated save → clear error', e1.includes('not valid JSON'), e1);
     check('save from a newer version → refused', e2.includes('newer'), e2);

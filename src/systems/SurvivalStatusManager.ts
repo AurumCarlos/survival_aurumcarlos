@@ -305,7 +305,7 @@ export function createSurvivor(id: number, name: string): Survivor {
     id, name,
     vitals: { health: 100, hunger: 85, thirst: 85, energy: 90, stamina: 100, bodyTemp: 37 },
     maxVitals: { health: 100, hunger: 100, thirst: 100, energy: 100, stamina: 100 },
-    inventory: { cols: 8, rows: 5, placements: [] },
+    inventory: { cols: 10, rows: 6, placements: [] },
     hotbar: [null, null, null, null, null, null],
     activeHotbarSlot: 0,
     equipped: { body: null },

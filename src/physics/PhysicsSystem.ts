@@ -31,7 +31,12 @@ export class PhysicsSystem implements System {
   /** Feet deeper than this below the surface → swimming (eyes stay above water). */
   static readonly SWIM_DEPTH = 1.3;
 
-  constructor(private readonly physics: PhysicsWorld, private readonly waterLevel = Number.NEGATIVE_INFINITY) {}
+  constructor(
+    private readonly physics: PhysicsWorld,
+    private readonly waterLevel = Number.NEGATIVE_INFINITY,
+    /** Height of a staircase surface under (x, z) near feet height, if any (player-built stairs). */
+    private readonly stairsAt: (x: number, z: number, feetY: number) => number | null = () => null,
+  ) {}
 
   fixedUpdate(world: World, dt: number): void {
     // 1. Snapshot previous state for interpolation.
@@ -50,7 +55,9 @@ export class PhysicsSystem implements System {
     for (const e of world.query(PlayerControlled, PhysicsBody, SurvivorC)) {
       const pc = world.require(e, PlayerControlled);
       const { body } = world.require(e, PhysicsBody);
-      pc.grounded = this.physics.isGrounded(body);
+      const feet0 = body.position.y - PLAYER_SHAPE.height / 2;
+      const onStairs = this.stairsAt(body.position.x, body.position.z, feet0) !== null;
+      pc.grounded = onStairs || this.physics.isGrounded(body);
 
       // Water: below SWIM_DEPTH the player floats with their head above the
       // surface instead of walking along the sea floor.
@@ -79,7 +86,7 @@ export class PhysicsSystem implements System {
       // Step assist: walk up onto foundations (≤ 0.7 m ledges) without jumping,
       // instead of grinding to a halt against the edge.
       const speed = Math.hypot(pc.desiredVelocity.x, pc.desiredVelocity.z);
-      if (pc.grounded && speed > 0.1 && body.velocity.y < 2) {
+      if (pc.grounded && !onStairs && speed > 0.1 && body.velocity.y < 2) {
         if (this.physics.canStepUp(body, pc.desiredVelocity.x / speed, pc.desiredVelocity.z / speed)) body.velocity.y = 3.2;
       }
 
@@ -92,6 +99,17 @@ export class PhysicsSystem implements System {
 
     // 3. Step exactly one fixed tick.
     this.physics.world.step(dt);
+
+    // Stairs: keep the player's feet on the flight (up or down) unless jumping.
+    for (const e of world.query(PlayerControlled, PhysicsBody)) {
+      const { body } = world.require(e, PhysicsBody);
+      if (body.velocity.y > 2.5) continue;
+      const feet = body.position.y - PLAYER_SHAPE.height / 2;
+      const h = this.stairsAt(body.position.x, body.position.z, feet);
+      if (h === null || feet > h + 0.45 || feet < h - 0.9) continue;
+      body.position.y = h + PLAYER_SHAPE.height / 2 + 0.02;
+      if (body.velocity.y < 0) body.velocity.y = 0;
+    }
 
     // 4. Write back to the ECS.
     for (const e of world.query(PhysicsBody, Transform)) {

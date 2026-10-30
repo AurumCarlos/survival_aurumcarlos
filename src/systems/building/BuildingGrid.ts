@@ -22,10 +22,12 @@ export const WALL_HEIGHT = 3;
 export const DOOR = { width: 1, height: 2.2 } as const;
 /** Single bed: 1 m wide, 2 m long, mattress top at 0.5 m. */
 export const BED = { width: 1.1, length: 2.1, height: 0.5 } as const;
+/** Straight flight filling one cell: 3 m run, 3 m rise (one storey), 1.8 m wide. */
+export const STAIRS = { width: 1.8, steps: 10 } as const;
 const FOUNDATION_CLEARANCE = 0.35;
 const MAX_PILLAR = 3.5;
 
-export type PieceKind = 'foundation' | 'wall' | 'doorway' | 'ceiling' | 'bed';
+export type PieceKind = 'foundation' | 'wall' | 'doorway' | 'ceiling' | 'stairs' | 'bed';
 /** Cell edges: n = −Z side, s = +Z, w = −X, e = +X. */
 export type Side = 'n' | 'e' | 's' | 'w';
 
@@ -49,11 +51,12 @@ export const PIECE_COSTS: Readonly<Record<PieceKind, ReadonlyArray<{ item: ItemI
   wall: [{ item: 'wood', qty: 2 }],
   doorway: [{ item: 'wood', qty: 2 }, { item: 'fiber', qty: 1 }],
   ceiling: [{ item: 'wood', qty: 2 }],
+  stairs: [{ item: 'wood', qty: 4 }],
   bed: [{ item: 'wood', qty: 3 }, { item: 'fiber', qty: 4 }],
 };
-export const PIECE_ORDER: readonly PieceKind[] = ['foundation', 'wall', 'doorway', 'ceiling', 'bed'];
+export const PIECE_ORDER: readonly PieceKind[] = ['foundation', 'wall', 'doorway', 'ceiling', 'stairs', 'bed'];
 export const PIECE_LABEL: Readonly<Record<PieceKind, string>> = {
-  foundation: 'Foundation', wall: 'Wall', doorway: 'Doorway', ceiling: 'Ceiling / floor', bed: 'Bed',
+  foundation: 'Foundation', wall: 'Wall', doorway: 'Doorway', ceiling: 'Ceiling / floor', stairs: 'Stairs', bed: 'Bed',
 };
 
 export interface TerrainQuery {
@@ -107,6 +110,8 @@ export class BuildingGrid {
   private readonly walls = new Map<string, Piece>();
   /** Furniture: at most one bed per floor cell. Its `side` is where the headboard goes. */
   private readonly beds = new Map<string, Piece>();
+  /** Stairs: one per floor cell; `side` is the edge they climb toward. */
+  private readonly stairs = new Map<string, Piece>();
   private readonly byId = new Map<number, Piece>();
 
   constructor(private readonly terrain: TerrainQuery) {}
@@ -143,6 +148,7 @@ export class BuildingGrid {
   /** Inserts without validation (used by place-after-validate and save loading). */
   insert(p: Piece): Piece {
     if (p.kind === 'bed') this.beds.set(this.floorKey(p.i, p.j, p.y), p);
+    else if (p.kind === 'stairs') this.stairs.set(this.floorKey(p.i, p.j, p.y), p);
     else if (isFloor(p.kind)) this.floors.set(this.floorKey(p.i, p.j, p.y), p);
     else this.walls.set(this.wallKey(edgeOf(p.i, p.j, p.side!), p.y), p);
     this.byId.set(p.id, p);
@@ -173,6 +179,7 @@ export class BuildingGrid {
 
   private detach(p: Piece): void {
     if (p.kind === 'bed') this.beds.delete(this.floorKey(p.i, p.j, p.y));
+    else if (p.kind === 'stairs') this.stairs.delete(this.floorKey(p.i, p.j, p.y));
     else if (isFloor(p.kind)) this.floors.delete(this.floorKey(p.i, p.j, p.y));
     else this.walls.delete(this.wallKey(edgeOf(p.i, p.j, p.side!), p.y));
     this.byId.delete(p.id);
@@ -185,6 +192,7 @@ export class BuildingGrid {
       case 'foundation':
         return true;
       case 'bed':
+      case 'stairs':
         return this.floorAt(p.i, p.j, p.y) !== undefined;
       case 'wall':
       case 'doorway': {
@@ -192,12 +200,35 @@ export class BuildingGrid {
         return cellsOfEdge(e).some(([ci, cj]) => this.floorAt(ci, cj, p.y) !== undefined);
       }
       case 'ceiling':
-        return this.ceilingHasWall(p.i, p.j, p.y) ||
+        return this.ceilingHasWall(p.i, p.j, p.y) || this.stairsLeadTo(p.i, p.j, p.y) ||
           NEIGHBOURS.some(([di, dj]) => {
             const n = this.floorAt(p.i + di, p.j + dj, p.y);
             return n?.kind === 'ceiling' && this.ceilingHasWall(n.i, n.j, n.y);
           });
     }
+  }
+
+  /** A flight of stairs below ends at this cell's edge: it holds up the landing. */
+  private stairsLeadTo(i: number, j: number, topY: number): boolean {
+    for (const s of this.stairs.values()) {
+      if (Math.abs(s.y + WALL_HEIGHT - topY) > 0.01) continue;
+      const [di, dj] = SIDE_DIR[s.side!];
+      if (s.i + di === i && s.j + dj === j) return true;
+    }
+    return false;
+  }
+
+  private stairsExitThrough(e: Edge, y: number): boolean {
+    for (const s of this.stairs.values()) {
+      if (Math.abs(s.y - y) > 0.01) continue;
+      const se = edgeOf(s.i, s.j, s.side!);
+      if (se.axis === e.axis && se.i === e.i && se.j === e.j) return true;
+    }
+    return false;
+  }
+
+  stairsAt(i: number, j: number, y: number): Piece | undefined {
+    return this.stairs.get(this.floorKey(i, j, y));
   }
 
   private ceilingHasWall(i: number, j: number, topY: number): boolean {
@@ -210,8 +241,18 @@ export class BuildingGrid {
     if (c.kind === 'bed') {
       if (!this.floorAt(c.i, c.j, c.y)) return 'A bed goes on a foundation or floor';
       if (this.beds.has(this.floorKey(c.i, c.j, c.y))) return 'There is already a bed here';
+      if (this.stairs.has(this.floorKey(c.i, c.j, c.y))) return 'The stairs take up this floor';
       return null;
     }
+    if (c.kind === 'stairs') {
+      if (!this.floorAt(c.i, c.j, c.y)) return 'Stairs go on a foundation or floor';
+      if (this.stairs.has(this.floorKey(c.i, c.j, c.y))) return 'There are already stairs here';
+      if (this.beds.has(this.floorKey(c.i, c.j, c.y))) return 'Move the bed first';
+      if (this.floorAt(c.i, c.j, c.y + WALL_HEIGHT)) return 'Remove the ceiling above: stairs need an opening';
+      if (this.wallAt(edgeOf(c.i, c.j, c.side!), c.y)) return 'A wall blocks the top of the stairs';
+      return null;
+    }
+    if (c.kind === 'ceiling' && this.stairs.has(this.floorKey(c.i, c.j, c.y - WALL_HEIGHT))) return 'Leave this open above the stairs';
     if (isFloor(c.kind)) {
       // Any floor in this column within one storey overlaps.
       for (const p of this.floors.values()) {
@@ -219,6 +260,8 @@ export class BuildingGrid {
       }
     } else if (this.wallAt(edgeOf(c.i, c.j, c.side!), c.y)) {
       return 'There is already a wall here';
+    } else if (this.stairsExitThrough(edgeOf(c.i, c.j, c.side!), c.y)) {
+      return 'That would block the top of the stairs';
     }
     if (!this.isSupported(c)) {
       return c.kind === 'ceiling' ? 'Needs a wall underneath to rest on' : 'Needs a foundation or floor';
@@ -300,6 +343,14 @@ export class BuildingGrid {
         }
       }
       return { kind, i, j, y: snapY(this.footprint(i, j).max + FOUNDATION_CLEARANCE) };
+    }
+
+    if (kind === 'stairs') {
+      if (!hit || !onTopOf(hitPiece)) return null;
+      // Climb away from the player, along the axis they're looking down.
+      const d = ray.dir;
+      const side: Side = Math.abs(d.x) > Math.abs(d.z) ? (d.x > 0 ? 'e' : 'w') : (d.z > 0 ? 's' : 'n');
+      return { kind, i: hitPiece.i, j: hitPiece.j, y: hitPiece.y, side };
     }
 
     if (kind === 'bed') {
@@ -387,6 +438,33 @@ export class BuildingGrid {
       insulation: enclosed ? 0.45 + 0.45 * roofFrac : 0.15 * roofFrac,
       roof: roofOver(i, j, y),
     };
+  }
+
+  /**
+   * Walking surface of any stairs under (x, z) whose height is near `nearY`
+   * (the player's feet), or null. The physics snaps the player onto it, so
+   * stairs climb smoothly without a ramp collider to slide down.
+   */
+  stairsSurfaceAt(x: number, z: number, nearY: number): number | null {
+    const i = Math.floor(x / CELL), j = Math.floor(z / CELL);
+    let best: number | null = null;
+    for (const s of this.stairs.values()) {
+      if (s.i !== i || s.j !== j) continue;
+      const lx = x / CELL - i, lz = z / CELL - j; // 0..1 inside the cell
+      let t: number, across: number;
+      switch (s.side!) {
+        case 'e': t = lx; across = lz; break;
+        case 'w': t = 1 - lx; across = lz; break;
+        case 's': t = lz; across = lx; break;
+        case 'n': t = 1 - lz; across = lx; break;
+      }
+      if (Math.abs(across - 0.5) * CELL > STAIRS.width / 2) continue;
+      // Halfway up each step's riser, so feet neither float nor sink by more than half a step.
+      const h = s.y + Math.min(WALL_HEIGHT, WALL_HEIGHT * Math.min(1, Math.max(0, t)) + WALL_HEIGHT / STAIRS.steps / 2);
+      if (h < nearY - 1 || h > nearY + 0.6) continue;
+      if (best === null || Math.abs(h - nearY) < Math.abs(best - nearY)) best = h;
+    }
+    return best;
   }
 
   /** World-space centre of a bed (it sits against its `side` edge) and its long axis. */

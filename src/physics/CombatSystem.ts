@@ -10,10 +10,11 @@ import type { SpatialHash } from '../core/SpatialHash';
 import {
   AIBrain, Creature, Cullable, PlayerControlled, ResourceC, StealthState, SurvivorC, Transform,
 } from '../components';
-import { itemDef, makeResource } from '../data/items';
+import { CARCASS_OF, itemDef, makeResource } from '../data/items';
 import { MELEE_REACH } from '../data/combat';
 import type { ItemStack } from '../data/schema';
-import { flatMaterial, spearGeometry } from '../render/LowPolyFactory';
+import { arrowGeometry, flatMaterial, spearGeometry } from '../render/LowPolyFactory';
+import { InventoryGrid } from '../systems/inventory/InventoryGrid';
 import { RenderObject } from '../render/Renderer';
 import { Groups, type PhysicsWorld } from './PhysicsWorld';
 
@@ -25,10 +26,15 @@ interface Projectile {
   life: number;
   /** Landed and waiting to be picked up. */
   resting: boolean;
+  /** Base damage at full speed. */
+  damage: number;
   hitEntities: Set<Entity>;
 }
 
 const THROW_SPEED = 26;
+const ARROW_SPEED = 48;
+/** Chance an arrow survives hitting something and can be picked up again. */
+const ARROW_RECOVERY = 0.6;
 const PROJECTILE_LIFE = 60;
 
 const FIST_DAMAGE = 5;
@@ -48,6 +54,8 @@ export class CombatSystem implements System {
   private readonly tmpQuat = new THREE.Quaternion();
   private readonly tmpDir = new THREE.Vector3();
   private readonly forward = new THREE.Vector3(0, 0, 1);
+  private readonly spearGeo: THREE.BufferGeometry;
+  private readonly arrowGeo: THREE.BufferGeometry;
 
   constructor(
     private readonly physics: PhysicsWorld,
@@ -64,6 +72,8 @@ export class CombatSystem implements System {
       else if (action === 'swing') this.pendingMelee = true;
     });
     const geo = spearGeometry();
+    this.spearGeo = geo;
+    this.arrowGeo = arrowGeometry();
     this.pool = new ObjectPool<Projectile>({
       prewarm: 8,
       max: 16,
@@ -78,7 +88,7 @@ export class CombatSystem implements System {
           collisionFilterGroup: Groups.PROJECTILE, collisionFilterMask: Groups.TERRAIN | Groups.STATIC | Groups.BUILDING,
         });
         body.addShape(new CANNON.Box(new CANNON.Vec3(0.04, 0.04, 0.8)));
-        return { mesh, body, stack: null, life: 0, resting: false, hitEntities: new Set() };
+        return { mesh, body, stack: null, life: 0, resting: false, damage: 10, hitEntities: new Set() };
       },
       reset: (p) => {
         p.mesh.visible = false;
@@ -106,7 +116,12 @@ export class CombatSystem implements System {
       const anim = world.require(player, PlayerAnimC);
       // In build mode the mouse buttons place/remove pieces instead.
       if (world.get(player, BuilderC)?.active) return void this.syncProjectiles();
-      if (this.input.wasPressed('throw')) anim.request = 'throw';
+      const s = world.get(player, SurvivorC);
+      const held = s ? s.hotbar[s.activeHotbarSlot] : null;
+      const ranged = !!held && !!itemDef(held.item).ammo;
+      // Bows shoot on the attack button (the 'throw' clip is the draw-and-release).
+      if (ranged && this.input.wasPressed('attack')) anim.request = 'throw';
+      else if (this.input.wasPressed('throw')) anim.request = 'throw';
       else if (this.input.wasPressed('attack')) anim.request = 'swing';
     }
     this.syncProjectiles();
@@ -152,11 +167,19 @@ export class CombatSystem implements System {
         const pp = world.require(player, Transform).position;
         if (Math.hypot(pp.x - p.body.position.x, pp.z - p.body.position.z) < 1.5) {
           const s = world.require(player, SurvivorC);
-          const free = s.hotbar.findIndex((h) => h === null);
-          if (free >= 0) {
-            s.hotbar[free] = p.stack;
-            p.stack = null;
-            toRelease.push(p);
+          if (itemDef(p.stack.item).category === 'ammo') {
+            if (new InventoryGrid(s.inventory).add(p.stack.item, p.stack.qty) === 0) {
+              p.stack = null;
+              toRelease.push(p);
+              this.events.emit('inventory:changed', { entity: player });
+            }
+          } else {
+            const free = s.hotbar.findIndex((h) => h === null);
+            if (free >= 0) {
+              s.hotbar[free] = p.stack;
+              p.stack = null;
+              toRelease.push(p);
+            }
           }
         }
       }
@@ -170,18 +193,43 @@ export class CombatSystem implements System {
   private throwSpear(world: World, player: Entity): void {
     const s = world.require(player, SurvivorC);
     const held = s.hotbar[s.activeHotbarSlot];
-    if (!held || held.item !== 'stone_spear') return;
+    if (!held) return;
+    const ammo = itemDef(held.item).ammo;
+    if (held.item !== 'stone_spear' && !ammo) return;
+    if (ammo) {
+      // Bow: take an arrow from the hotbar or the bag.
+      const bag = new InventoryGrid(s.inventory);
+      const hb = s.hotbar.findIndex((h) => h?.item === ammo);
+      if (hb >= 0) {
+        const h = s.hotbar[hb]!;
+        if (--h.qty <= 0) s.hotbar[hb] = null;
+      } else if (bag.remove(ammo, 1) === 0) {
+        this.events.emit('ui:toast', { text: `No ${itemDef(ammo).name}s left`, warn: true });
+        return;
+      }
+      this.events.emit('inventory:changed', { entity: player });
+      if (held.durability !== undefined) held.durability -= 1;
+    }
     const p = this.pool.acquire();
     if (!p) return;
-    s.hotbar[s.activeHotbarSlot] = null;
-    p.stack = held;
+    if (ammo) {
+      p.stack = { item: ammo, qty: 1 };
+      p.damage = itemDef(held.item).tool?.damage ?? 30;
+      p.mesh.geometry = this.arrowGeo;
+    } else {
+      s.hotbar[s.activeHotbarSlot] = null;
+      p.stack = held;
+      p.damage = itemDef(held.item).tool?.damage ?? 10;
+      p.mesh.geometry = this.spearGeo;
+    }
     p.life = PROJECTILE_LIFE;
+    const speed = ammo ? ARROW_SPEED : THROW_SPEED;
 
     this.camera.getWorldDirection(this.tmpDir);
     const origin = this.camera.position;
     p.body.type = CANNON.Body.DYNAMIC;
     p.body.position.set(origin.x + this.tmpDir.x * 0.8, origin.y + this.tmpDir.y * 0.8, origin.z + this.tmpDir.z * 0.8);
-    p.body.velocity.set(this.tmpDir.x * THROW_SPEED, this.tmpDir.y * THROW_SPEED + 1.5, this.tmpDir.z * THROW_SPEED);
+    p.body.velocity.set(this.tmpDir.x * speed, this.tmpDir.y * speed + (ammo ? 0.6 : 1.5), this.tmpDir.z * speed);
     p.body.wakeUp();
     this.physics.world.addBody(p.body);
     p.mesh.visible = true;
@@ -196,7 +244,8 @@ export class CombatSystem implements System {
     const held = s.hotbar[s.activeHotbarSlot];
     const tool = held ? itemDef(held.item).tool : undefined;
     const damage = tool ? tool.damage : FIST_DAMAGE;
-    const reach = held?.item === 'stone_spear' ? MELEE_REACH.spear : tool ? MELEE_REACH.tool : MELEE_REACH.fist;
+    const long = !!held && itemDef(held.item).size.h >= 3; // spear, pike
+    const reach = long ? MELEE_REACH.spear : tool ? MELEE_REACH.tool : MELEE_REACH.fist;
     const target = this.meleeTarget(world, pp, pc.yaw, reach);
     if (target !== null) {
       this.damageCreature(world, target, damage, pp);
@@ -249,9 +298,10 @@ export class CombatSystem implements System {
       const cp = world.require(e, Transform).position;
       if (Math.hypot(cp.x - bp.x, cp.y + 0.6 - bp.y, cp.z - bp.z) > 0.9) continue;
       p.hitEntities.add(e);
-      const base = p.stack ? (itemDef(p.stack.item).tool?.damage ?? 10) : 10;
-      this.damageCreature(world, e, base * Math.min(1.5, speed / 18), { x: bp.x, y: bp.y, z: bp.z });
+      const ref = p.stack && itemDef(p.stack.item).category === 'ammo' ? ARROW_SPEED * 0.75 : 18;
+      this.damageCreature(world, e, p.damage * Math.min(1.5, speed / ref), { x: bp.x, y: bp.y, z: bp.z });
       p.body.velocity.scale(0.2, p.body.velocity); // embed / lose momentum
+      if (p.stack && itemDef(p.stack.item).category === 'ammo' && Math.random() > ARROW_RECOVERY) p.stack = null; // arrow broke
     }
   }
 
@@ -280,7 +330,7 @@ export class CombatSystem implements System {
     world.remove(e, AIBrain);
     world.remove(e, Creature);
     world.remove(e, Cullable);
-    world.add(e, ResourceC, makeResource(e, 'carcass', { ...t.position }));
+    world.add(e, ResourceC, makeResource(e, 'carcass', { ...t.position }, CARCASS_OF[c.species] ?? -1));
     this.resourceIndex.insert(e, t.position.x, t.position.z);
     const ro = world.get(e, RenderObject);
     if (ro) {

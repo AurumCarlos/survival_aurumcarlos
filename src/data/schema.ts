@@ -16,27 +16,37 @@ export interface Vec3 {
 // Items & resources
 // ---------------------------------------------------------------------------
 
-export type ItemId =
-  | 'wood'
-  | 'stone'
-  | 'fiber'
-  | 'raw_meat'
-  | 'cooked_meat'
-  | 'berries'
-  | 'water_raw'
-  | 'water_boiled'
-  | 'hide'
-  | 'stone_axe'
-  | 'stone_pickaxe'
-  | 'stone_spear'
-  | 'torch'
-  | 'campfire_kit'
-  | 'lean_to_kit'
-  | 'fur_cloak';
+/** Every item in the game. Stable string ids: saves store them. */
+export const ITEM_IDS = [
+  // raw resources
+  'wood', 'thatch', 'stone', 'flint', 'fiber', 'hide', 'pelt', 'keratin', 'chitin', 'metal', 'obsidian', 'crystal',
+  'oil', 'silica_pearls', 'black_pearl', 'sulfur', 'salt', 'rare_flower', 'rare_mushroom', 'spoiled_meat',
+  // refined
+  'charcoal', 'sparkpowder', 'gunpowder', 'cementing_paste', 'metal_ingot', 'gasoline', 'polymer', 'electronics',
+  'narcotic', 'stimulant',
+  // food & drink
+  'raw_meat', 'cooked_meat', 'raw_prime_meat', 'cooked_prime_meat', 'raw_fish', 'cooked_fish', 'jerky', 'prime_jerky',
+  'berries', 'amarberry', 'azulberry', 'tintoberry', 'narcoberry', 'stimberry',
+  'water_raw', 'water_boiled', 'medical_brew', 'energy_brew', 'mushroom_stew', 'flower_tea',
+  // tools & weapons
+  'stone_axe', 'stone_pickaxe', 'metal_hatchet', 'metal_pick', 'metal_sickle', 'torch',
+  'stone_spear', 'metal_pike', 'wooden_club', 'metal_sword', 'bow', 'stone_arrow', 'gps',
+  // armour
+  'cloth_armor', 'hide_armor', 'fur_cloak', 'chitin_armor', 'flak_armor',
+  // placeables
+  'campfire_kit', 'lean_to_kit', 'storage_box_kit', 'large_storage_box_kit', 'mortar_pestle_kit', 'smithy_kit',
+  'refining_forge_kit', 'cooking_pot_kit', 'preserving_bin_kit', 'fabricator_kit',
+] as const;
+export type ItemId = (typeof ITEM_IDS)[number];
 
-export type ItemCategory = 'material' | 'food' | 'drink' | 'tool' | 'weapon' | 'placeable' | 'wearable';
+export type ItemCategory = 'material' | 'refined' | 'food' | 'drink' | 'medicine' | 'tool' | 'weapon' | 'ammo' | 'wearable' | 'placeable';
 
-export type ToolTag = 'axe' | 'pickaxe' | 'blade';
+export type ToolTag = 'axe' | 'pickaxe' | 'blade' | 'sickle';
+
+/** Things that can be put down in the world from the inventory. */
+export type PlaceableKind =
+  | 'campfire' | 'lean_to' | 'storage_box' | 'large_storage_box' | 'mortar_pestle' | 'smithy'
+  | 'refining_forge' | 'cooking_pot' | 'preserving_bin' | 'fabricator';
 
 export interface ItemDef {
   id: ItemId;
@@ -64,9 +74,15 @@ export interface ItemDef {
   wearable?: {
     /** °C added to effective ambient temperature when cold. */
     insulation: number;
+    /** Fraction of creature damage absorbed (0..1). */
+    armor?: number;
   };
   /** For placeables: which structure entity to spawn. */
-  places?: 'campfire' | 'lean_to';
+  places?: PlaceableKind;
+  /** Ranged weapons: the ammo they fire. */
+  ammo?: ItemId;
+  /** One line shown in the crafting panel. */
+  description?: string;
 }
 
 /** A stack living in an inventory. Durability only applies to tools. */
@@ -76,7 +92,10 @@ export interface ItemStack {
   durability?: number;
 }
 
-export type ResourceKind = 'tree' | 'rock' | 'berry_bush' | 'fiber_plant' | 'carcass' | 'water_source';
+export type ResourceKind =
+  | 'tree' | 'rock' | 'berry_bush' | 'fiber_plant' | 'carcass' | 'water_source'
+  | 'mushroom' | 'metal_rock' | 'obsidian_rock' | 'crystal' | 'oil_rock' | 'shell_bed' | 'salt_deposit'
+  | 'rare_flower' | 'fish_shoal';
 
 export interface ResourceYield {
   item: ItemId;
@@ -84,6 +103,12 @@ export interface ResourceYield {
   max: number;
   /** 0..1, rolled per harvest action. */
   chance: number;
+  /**
+   * What favours this particular yield. Unset: the resource's right tool.
+   * 'hands': more by hand than with the chopping tool (thatch from trees).
+   * A tool tag: that tool multiplies it (a sickle for fiber).
+   */
+  favour?: 'hands' | ToolTag;
 }
 
 /**

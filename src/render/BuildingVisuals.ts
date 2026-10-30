@@ -5,7 +5,7 @@ import { PlayerControlled } from '../components';
 import { BuildingGrid, CELL, DOOR, edgeOf, edgeSegment, type Candidate, type Piece } from '../systems/building/BuildingGrid';
 import { BuilderC } from '../systems/building/BuildingSystem';
 import {
-  bedGeometry, ceilingGeometry, doorGeometry, doorwayGeometry, flatMaterial, foundationGeometry, wallGeometry,
+  bedGeometry, ceilingGeometry, stairsGeometry, doorGeometry, doorwayGeometry, flatMaterial, foundationGeometry, wallGeometry,
 } from './LowPolyFactory';
 
 /**
@@ -96,6 +96,8 @@ export class BuildingVisuals implements System {
     switch (c.kind) {
       case 'bed':
         return mesh(bedGeometry());
+      case 'stairs':
+        return mesh(stairsGeometry());
       case 'foundation':
         return mesh(foundationGeometry(c.y - this.grid.groundUnder(c.i, c.j) + 0.5));
       case 'ceiling':
@@ -122,6 +124,12 @@ export class BuildingVisuals implements System {
       obj.position.set(b.x, c.y, b.z);
       const [di, dj] = c.side === 'e' ? [1, 0] : c.side === 'w' ? [-1, 0] : c.side === 's' ? [0, 1] : [0, -1];
       obj.rotation.y = Math.atan2(di, dj); // model's headboard (+Z) → toward the chosen edge
+      return;
+    }
+    if (c.kind === 'stairs') {
+      obj.position.set((c.i + 0.5) * CELL, c.y, (c.j + 0.5) * CELL);
+      const [di, dj] = c.side === 'e' ? [1, 0] : c.side === 'w' ? [-1, 0] : c.side === 's' ? [0, 1] : [0, -1];
+      obj.rotation.y = Math.atan2(di, dj); // model climbs toward +Z
       return;
     }
     if (c.kind === 'foundation' || c.kind === 'ceiling') {

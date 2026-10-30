@@ -1,3 +1,4 @@
+import { treeTrunkRadius } from '../../../world/TreeSpecies';
 import type { PropPlacement, TerrainData } from '../../../world/TerrainGenerator';
 import { sampleHeight, sampleSlope } from '../../../world/TerrainGenerator';
 
@@ -36,10 +37,14 @@ export const FIR_HEIGHT = 16;
 
 /** Collider sizes MUST match PhysicsWorld.addStaticProps so AI and physics agree on what's solid. */
 export function obstacleRadius(p: PropPlacement): number {
-  if (p.kind === 'tree') return FIR_TRUNK_RADIUS * p.scale;
+  if (p.kind === 'tree') return treeTrunkRadius(p.variant) * p.scale;
   if (p.kind === 'rock' && p.scale > 1) return 0.6 * p.scale;
+  if (SOLID_NODES.has(p.kind)) return 0.55 * p.scale;
   return 0;
 }
+
+/** Ore and tar rocks are always solid (plain rocks only when big). */
+export const SOLID_NODES: ReadonlySet<string> = new Set(['metal_rock', 'obsidian_rock', 'crystal', 'oil_rock']);
 
 export function buildNavGrid(t: TerrainData, cellSize = 1): NavGridData {
   const { size, waterLevel } = t.cfg;

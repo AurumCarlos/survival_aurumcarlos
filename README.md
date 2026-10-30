@@ -271,9 +271,62 @@ cost 300 ms per step; compound bodies cost 0.5 ms.
   - Refused in daytime, or if a predator nearby is hunting or aware of you.
   - Sleeping outside on a cold night can kill you, so put the bed in a roofed house.
 
+## 9. Tree species, ARK resources, stations, storage, stairs
+
+- **Seven tree species** (`world/TreeSpecies.ts`): fir, spruce, pine, oak, birch, redwood, and palms
+  on the upper beach.
+  - Species are picked from three slow noise fields, so they grow in groves that blend at the edges,
+    with the odd tree of another kind inside: a mix, but not a uniform one. On a 256 m island the
+    mix is roughly 25–35 % fir, then spruce, pine, oak, birch, and a few redwood groves.
+  - Trees are drawn 25 % taller without thicker trunks (`TREE_HEIGHT_STRETCH`), so the forest is as
+    walkable as before.
+  - Prop positions are unchanged (species come from hashes, not the RNG), so old saves keep their
+    resource IDs.
+- **ARK resources.** Items now include wood, thatch, stone, flint, fiber, hide, pelt, keratin,
+  chitin, metal ore, obsidian, crystal, oil, silica pearls, black pearls, sulfur, salt, rare
+  flowers and mushrooms, and the six berries.
+  - New nodes are appended after the old props:
+    - inland outcrops of metal, obsidian and crystal (pickaxe required);
+    - oil rocks, salt crusts and shell beds on the shore;
+    - fish shoals in the lagoon;
+    - rare flowers in clearings.
+  - Yields depend on the tool, ARK-style: thatch by hand and wood with the axe; a sickle triples
+    fiber and berries.
+  - Carcasses depend on the species: wolves give pelts, boars keratin, and deer and boars prime
+    meat.
+- **Placed structures** (`data/stations.ts`): storage box (24 slots), large storage box (60),
+  mortar & pestle, smithy, refining forge, cooking pot, preserving bin and fabricator.
+  - Press E on one to open its inventory next to yours. Click an item to move it across; "Pick up"
+    returns an empty structure to your bag.
+  - Fires, forges and pots cook or smelt whatever is inside while lit, burning wood, thatch or
+    sparkpowder from the same inventory (`StationSystem`). Burnt wood leaves charcoal.
+  - The preserving bin needs no fuel. The fabricator must be powered with gasoline.
+- **Crafting menu rework** (`ui/InventoryUI.ts`):
+  - category tabs, search, and a recipe list sorted by what you can make now;
+  - a detail card with ingredients (have/need), the required station, stats and time, plus Craft
+    ×1 / ×5;
+  - station chips that light up when you are in range;
+  - a "Cook & Smelt" reference tab.
+  - About 40 recipes (tools, metal tools, bow and arrows, armour, structures, refining, food and
+    medicine) and 16 cooking/smelting recipes.
+- **Weapons and armour:**
+  - Metal hatchet, pick and sickle, pike, sword, wooden club, and a bow with stone arrows (60 % of
+    arrows can be picked up again).
+  - Cloth, hide, fur, chitin and flak armour reduce creature damage by up to half (`wearable.armor`).
+  - A GPS shows your coordinates.
+- **Campfires and structures land on buildings:** placement casts down onto the floor or foundation
+  instead of using terrain height (`physics/Placement.ts`), and never through a wall.
+- **Stairs** (4 wood): a straight flight filling one cell and climbing one storey toward where you
+  look. The player is snapped onto the flight surface (no ramp to slide down), and the stairs hold
+  up the landing ceiling at the top.
+  - Placement is refused if a wall blocks the top, if there is a ceiling over the stairwell, or if a
+    bed is in the same cell.
+- **Saves v4:** structures with their contents, fire state and smelting progress, and carcass
+  species. v3 saves still load, and the bag grows from 8×5 to 10×6.
+
 ## Verification
 
-- `npm test`: 29 survival + 46 refactor + 49 island/building + 14 gameplay + 21 world/physics checks (real cannon-es), all passing. They cover:
+- `npm test`: 29 survival + 46 refactor + 52 island/building + 14 gameplay + 41 crafting/stations + 29 world/physics checks (real cannon-es), all passing. They cover:
   - flow fields: around a wall through a gap, and 40 random trips across the real forest with
     zero entries into blocked cells;
   - LOD: dormant creatures freeze and wake in place;
@@ -293,7 +346,8 @@ cost 300 ms per step; compound bodies cost 0.5 ms.
 
 ## Known gaps
 
-- Spears in flight or lying on the ground are not saved; spears in the hotbar are.
+- Spears and arrows in flight or lying on the ground are not saved; those in the hotbar or bag are.
+- Not included from ARK: Element, organic polymer, honey, seeds and farming, sand/clay (Scorched Earth), and guns (gunpowder is craftable but has no use yet).
 - Creatures more than 112 cells from their goal hold position rather than path (it doesn't happen
   with current perception ranges).
 - The viewmodel is pose-based (procedural keyframes), not skinned animation. `viewModelPose()` is

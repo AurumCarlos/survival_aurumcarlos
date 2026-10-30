@@ -134,14 +134,14 @@ console.log('\n── Game loop: tab switch + frame-rate independence ──');
 console.log('\n── Inventory & crafting ──');
 {
   const inv = new InventoryGrid({ cols: 4, rows: 2, placements: [] });
-  check('stacks merge up to maxStack', inv.add('wood', 25) === 0 && inv.placements.length === 2);
+  check('stacks merge up to maxStack', inv.add('wood', 125) === 0 && inv.placements.length === 2);
   inv.add('stone', 2);
   inv.add('fiber', 2);
   const engine = new CraftingEngine();
   const ctx = { nearbyStations: new Set(['hands'] as const) };
   check('axe craftable with 2 wood, 2 stone, 2 fiber', engine.check(inv, 'stone_axe', ctx).ok);
   // Fill every remaining cell so the 1×2 axe can't fit even after inputs are freed.
-  inv.add('berries', 15 * 4);
+  inv.add('berries', 50 * 4);
   const before = JSON.stringify(inv.data.placements);
   const r = engine.craft(inv, 'stone_axe', ctx);
   check('full inventory: craft refused…', !r.ok && r.reason === 'no-room', r.ok ? 'ok' : r.reason);

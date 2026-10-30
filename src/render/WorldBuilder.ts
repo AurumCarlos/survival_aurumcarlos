@@ -1,15 +1,18 @@
 import * as THREE from 'three';
 import type { Entity, System, World } from '../core/ecs/World';
 import type { EventBus } from '../core/EventBus';
-import { Creature, HeatSource, ResourceC, ShelterZone, Transform } from '../components';
+import { Creature, HeatSource, ResourceC, ShelterZone, Structure, Transform } from '../components';
 import type { AssetLoader } from '../assets/AssetLoader';
-import { ISLAND, type TerrainData, type PropKind } from '../world/TerrainGenerator';
+import { ISLAND, TREE_HEIGHT_STRETCH, type TerrainData, type PropKind } from '../world/TerrainGenerator';
 import type { PopulatedWorld } from '../world/WorldPopulator';
-import { campfireObject, firLowGeometry, flatMaterial, leanToObject, propGeometry } from './LowPolyFactory';
+import { campfireObject, firLowGeometry, flatMaterial, leanToObject, propGeometry, structureObject } from './LowPolyFactory';
 import { creatureMesh } from './CreatureModels';
 import { RenderObject } from './Renderer';
+import { treeShape } from '../world/TreeSpecies';
 
-const CASTS_SHADOW: ReadonlySet<PropKind> = new Set<PropKind>(['tree', 'rock', 'berry_bush', 'log']);
+const CASTS_SHADOW: ReadonlySet<PropKind> = new Set<PropKind>(['tree', 'rock', 'berry_bush', 'log', 'metal_rock', 'obsidian_rock', 'crystal', 'oil_rock']);
+/** Kinds whose variant changes the mesh. */
+const VARIANT_MESH: ReadonlySet<PropKind> = new Set<PropKind>(['rock', 'berry_bush', 'metal_rock', 'obsidian_rock', 'crystal', 'rare_flower']);
 
 export interface Chunk {
   group: THREE.Group;
@@ -87,7 +90,7 @@ export async function buildWorldVisuals(
     for (const i of byChunk[ci]!) {
       const p = terrain.props[i]!;
       if (p.kind === 'water_source') continue; // the pond itself is the visual
-      const key = `${p.kind}|${p.kind === 'tree' || p.kind === 'rock' ? p.variant : 0}`;
+      const key = `${p.kind}|${p.kind === 'tree' ? treeShape(p.variant) : VARIANT_MESH.has(p.kind) ? p.variant % 4 : 0}`;
       let b = buckets.get(key);
       if (!b) buckets.set(key, (b = []));
       b.push(i);
@@ -109,6 +112,7 @@ export async function buildWorldVisuals(
         pos.set(p.position.x, p.position.y - 0.08, p.position.z); // sink slightly so props don't float on slopes
         q.setFromAxisAngle(up, p.rotationY);
         s.setScalar(p.scale);
+        if (p.kind === 'tree') s.y *= TREE_HEIGHT_STRETCH; // taller, not thicker
         m.compose(pos, q, s);
         mesh.setMatrixAt(n, m);
         low?.setMatrixAt(n, m);
@@ -180,6 +184,13 @@ export function bindEntityVisuals(world: World, scene: THREE.Scene, assets: Asse
     if (world.has(e, RenderObject)) continue;
     const sp = world.require(e, Creature).species;
     attach(e, assets?.get(sp) ?? creatureMesh(sp), true);
+  }
+  for (const e of world.query(Structure, Transform)) {
+    if (world.has(e, RenderObject)) continue;
+    const st = world.require(e, Structure);
+    const obj = (st.kind === 'campfire' || st.kind === 'lean_to' ? assets?.get(st.kind) : undefined) ?? structureObject(st.kind);
+    obj.rotation.y = st.yaw;
+    attach(e, obj, false);
   }
   for (const e of world.query(HeatSource, Transform)) {
     if (!world.has(e, RenderObject)) attach(e, assets?.get('campfire') ?? campfireObject(), false);

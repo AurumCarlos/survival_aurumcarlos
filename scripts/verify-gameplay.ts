@@ -29,16 +29,25 @@ function gather(kind: ResourceKind, held: ItemStack | null, item: 'wood' | 'ston
   s.hotbar[0] = held ? { ...held } : null;
   s.activeHotbarSlot = 0;
   const inv = new InventoryGrid(s.inventory);
-  const r = makeResource(1, kind, { x: 0, y: 0, z: 0 });
-  const fx = toolEffect(r, s.hotbar[0] ?? null);
   const rng = mulberry32(42);
   let swings = 0;
-  while (r.hitPoints > 0 && swings < 50) {
-    harvest(s, inv, r, rng);
-    swings++;
+  // Averaged over 10 nodes: single nodes are too random to compare tools.
+  const NODES = 10;
+  let fx: ReturnType<typeof toolEffect> = null;
+  for (let n = 0; n < NODES; n++) {
+    const r = makeResource(1, kind, { x: 0, y: 0, z: 0 });
+    fx = toolEffect(r, s.hotbar[0] ?? null);
+    if (s.hotbar[0]?.durability !== undefined) s.hotbar[0].durability = 999;
+    let k = 0;
+    while (r.hitPoints > 0 && k++ < 50) {
+      harvest(s, inv, r, rng);
+      swings++;
+    }
   }
+  swings /= NODES;
+  const items = inv.count(item) / NODES;
   const seconds = (swings * 0.62) / (fx?.speed ?? 1); // harvest clip is 0.62 s at speed 1
-  return { swings, items: inv.count(item), seconds, perSecond: inv.count(item) / seconds, fit: fx?.fit };
+  return { swings, items, seconds, perSecond: items / seconds, fit: fx?.fit };
 }
 
 console.log('\n── Tools matter ──');
@@ -55,7 +64,7 @@ const rows: Array<[string, ReturnType<typeof gather>]> = [
   ['carcass / hands', gather('carcass', null, 'raw_meat')],
   ['carcass / spear', gather('carcass', spear, 'raw_meat')],
 ];
-for (const [label, r] of rows) console.log(`   ${label.padEnd(17)} ${String(r.swings).padStart(2)} swings → ${String(r.items).padStart(2)} items in ${r.seconds.toFixed(1)} s (${r.perSecond.toFixed(2)}/s)`);
+for (const [label, r] of rows) console.log(`   ${label.padEnd(17)} ${r.swings.toFixed(1).padStart(4)} swings → ${r.items.toFixed(1).padStart(4)} items in ${r.seconds.toFixed(1)} s (${r.perSecond.toFixed(2)}/s)`);
 const get = (l: string) => rows.find(([x]) => x === l)![1];
 check('pickaxe mines stone ≥ 4× faster than bare hands', get('rock / pickaxe').perSecond >= 4 * get('rock / hands').perSecond);
 check('pickaxe beats the axe on rock', get('rock / pickaxe').perSecond > 2 * get('rock / axe').perSecond);

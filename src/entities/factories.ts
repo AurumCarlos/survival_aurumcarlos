@@ -1,8 +1,10 @@
 import type { Entity, World } from '../core/ecs/World';
 import {
   AIBrain, Creature, Cullable, HeatSource, Interactable, PlayerControlled, ResourceC, ShelterZone, StealthState,
-  SurvivorC, Transform, makePerception, makeTransform, type CreatureSpecies,
+  Structure, SurvivorC, Transform, makePerception, makeTransform, type CreatureSpecies,
 } from '../components';
+import { STRUCTURES } from '../data/stations';
+import type { InventoryGridData, PlaceableKind } from '../data/schema';
 import { makeResource } from '../data/items';
 import type { ResourceKind, Vec3 } from '../data/schema';
 import { makeBlackboard } from '../systems/ai/AISystem';
@@ -76,19 +78,41 @@ export function spawnResource(world: World, kind: ResourceKind, pos: Vec3, varia
   return e;
 }
 
-export function spawnCampfire(world: World, pos: Vec3, fuelSeconds = 600): Entity {
+/**
+ * Any placeable structure. Fuel-burning ones get a HeatSource; the campfire
+ * starts lit with 10 minutes of fuel (so a fresh fire is useful at once),
+ * forges and pots start cold and empty.
+ */
+export function spawnStructure(
+  world: World, kind: PlaceableKind, pos: Vec3,
+  opts: { yaw?: number; container?: InventoryGridData | null; lit?: boolean; fuelSeconds?: number } = {},
+): Entity {
+  const def = STRUCTURES[kind];
   const e = world.create();
   world.add(e, Transform, makeTransform(pos.x, pos.y, pos.z));
-  world.add(e, HeatSource, {
-    peakWarmthC: 28, radius: 6, lit: true, fuelSeconds, scaresCreatures: true, isStation: 'campfire',
+  world.add(e, Structure, {
+    kind, yaw: opts.yaw ?? 0,
+    container: opts.container ?? (def.slots ? { cols: def.slots.cols, rows: def.slots.rows, placements: [] } : null),
+    processing: { recipeId: null, progress: 0 },
   });
-  world.add(e, Interactable, { prompt: 'Add fuel', range: 2.5 });
+  if (def.fuel) {
+    const campfire = kind === 'campfire';
+    world.add(e, HeatSource, {
+      peakWarmthC: def.heat?.peakWarmthC ?? 0, radius: def.heat?.radius ?? 0.01,
+      lit: opts.lit ?? campfire, fuelSeconds: opts.fuelSeconds ?? (campfire ? 600 : 0),
+      scaresCreatures: def.heat?.scaresCreatures ?? false,
+      isStation: def.craftStation === 'campfire' || def.craftStation === 'fabricator' ? def.craftStation : null,
+    });
+  }
+  if (kind === 'lean_to') world.add(e, ShelterZone, { halfExtents: { x: 1.6, y: 2, z: 1.4 }, insulation: 0.45, roof: true });
+  world.add(e, Interactable, { prompt: def.label, range: 2.5 });
   return e;
 }
 
+export function spawnCampfire(world: World, pos: Vec3, fuelSeconds = 600): Entity {
+  return spawnStructure(world, 'campfire', pos, { fuelSeconds, lit: true });
+}
+
 export function spawnLeanTo(world: World, pos: Vec3): Entity {
-  const e = world.create();
-  world.add(e, Transform, makeTransform(pos.x, pos.y, pos.z));
-  world.add(e, ShelterZone, { halfExtents: { x: 1.6, y: 2, z: 1.4 }, insulation: 0.45, roof: true });
-  return e;
+  return spawnStructure(world, 'lean_to', pos);
 }
