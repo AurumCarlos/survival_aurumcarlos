@@ -29,8 +29,8 @@ export interface StructureDef {
   heat: { peakWarmthC: number; radius: number; scaresCreatures: boolean } | null;
   /** Collider/footprint half-size (m) and height. */
   size: { hx: number; hz: number; h: number };
-  /** Item given back when picked up. */
-  kit: ItemId;
+  /** Item given back when picked up (null: can't be picked up). */
+  kit: ItemId | null;
 }
 
 const p = (id: string, name: string, inputs: Array<[ItemId, number]>, output: ItemId, qty: number, time: number): ProcessRecipe =>
@@ -99,6 +99,10 @@ export const STRUCTURES: Readonly<Record<PlaceableKind, StructureDef>> = {
       p('prime_jerky', 'Prime Meat Jerky', [['cooked_prime_meat', 1], ['salt', 1], ['oil', 1]], 'prime_jerky', 1, 25),
     ],
     craftStation: null, heat: null, size: { hx: 0.5, hz: 0.4, h: 0.8 }, kit: 'preserving_bin_kit',
+  },
+  death_bag: {
+    label: 'Your belongings', slots: { cols: 10, rows: 9 }, fuel: null, processes: [], craftStation: null, heat: null,
+    size: { hx: 0.35, hz: 0.3, h: 0.5 }, kit: null,
   },
   fabricator: {
     label: 'Fabricator', slots: { cols: 4, rows: 2 }, fuel: { gasoline: 120 }, processes: [], craftStation: 'fabricator',

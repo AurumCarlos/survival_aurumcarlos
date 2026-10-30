@@ -22,7 +22,7 @@ const ALLOWED: Readonly<Record<AppState, readonly AppState[]>> = {
   loading: ['paused', 'menu', 'config'],
   playing: ['paused', 'gameover'],
   paused: ['playing', 'menu', 'gameover'],
-  gameover: ['menu', 'config'],
+  gameover: ['menu', 'config', 'paused'], // paused: respawned at a bed
 };
 
 export interface AsyncTicket {

@@ -61,6 +61,11 @@ const SPECIES: Record<CreatureSpecies, Omit<Creature, 'perception' | 'heading'> 
   },
 };
 
+/** Adult stats of a species (babies scale from these as they grow). */
+export function speciesStats(species: CreatureSpecies): Readonly<Omit<Creature, 'perception' | 'heading'>> {
+  return SPECIES[species];
+}
+
 export function spawnCreature(world: World, species: CreatureSpecies, home: Vec3, seed: number, patrolRadius = 14): Entity {
   const e = world.create();
   const t = SPECIES[species];

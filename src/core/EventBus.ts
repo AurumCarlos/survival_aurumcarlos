@@ -40,6 +40,8 @@ export interface GameEvents {
   'structure:removed': { entity: Entity };
   /** The player was hit (bite, claw…). Drives the red damage flash. */
   'player:damaged': { entity: Entity; amount: number; source: string };
+  /** A baby animal was born (the render layer gives it a mesh). */
+  'creature:born': { entity: Entity; species: string };
   /** Short message for the player. */
   'ui:toast': { text: string; warn?: boolean };
 }

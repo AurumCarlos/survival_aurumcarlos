@@ -4,6 +4,7 @@ import {
   type AIState, type Blackboard, type CreatureSpecies,
 } from '../components';
 import { PLACEABLE_KINDS } from '../data/stations';
+import { applyGrowth } from '../systems/ai/BreedingSystem';
 import { ITEMS } from '../data/items';
 import type { InventoryGridData, PlaceableKind, Survivor, Vec3 } from '../data/schema';
 import { spawnCreature, spawnPlayer, spawnStructure } from '../entities/factories';
@@ -44,6 +45,8 @@ export interface WorldSnapshot {
     processing?: { recipeId: string | null; progress: number };
   }>;
   creatures: Array<{
+    /** Young animals (0..1); absent = adult. */
+    growth?: number;
     species: CreatureSpecies;
     position: Vec3;
     heading: number;
@@ -115,6 +118,7 @@ export function captureSnapshot(world: World, ctx: CaptureContext): WorldSnapsho
     const c = world.require(e, Creature);
     if (c.health <= 0) continue;
     creatures.push({
+      ...(c.growth !== undefined ? { growth: c.growth } : {}),
       species: c.species,
       position: vec(world.require(e, Transform).position),
       heading: c.heading,
@@ -313,11 +317,19 @@ export function applySnapshot(world: World, s: WorldSnapshot, populated: Populat
     t.prevPosition = vec(c.position);
     const k = world.require(e, Creature);
     k.heading = c.heading;
+    t.rotation = { x: 0, y: Math.sin(c.heading / 2), z: 0, w: Math.cos(c.heading / 2) };
+    t.prevRotation = { ...t.rotation };
     k.health = Math.min(c.health, k.maxHealth);
     k.perception.awareness = c.awareness;
     k.perception.lastKnownTargetPos = c.lastKnownTargetPos;
     k.perception.lastKnownAge = c.lastKnownTargetPos ? 0 : Number.POSITIVE_INFINITY;
     world.require(e, AIBrain).blackboard = { ...c.blackboard, stuckTimer: c.blackboard.stuckTimer ?? 0 };
+    if (typeof c.growth === 'number' && c.growth < 1) {
+      k.growth = Math.max(0.05, c.growth);
+      const hp = k.health;
+      applyGrowth(world, e);
+      k.health = Math.min(hp, k.maxHealth);
+    }
   }
 
   const player = spawnPlayer(world, s.player.position, s.player.survivor.name);

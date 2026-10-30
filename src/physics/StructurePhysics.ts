@@ -6,7 +6,7 @@ import { STRUCTURES } from '../data/stations';
 import { Groups, type PhysicsWorld } from './PhysicsWorld';
 
 /** Fires and the lean-to stay walk-through, as before; boxes and stations are solid. */
-const WALK_THROUGH = new Set(['campfire', 'lean_to']);
+const WALK_THROUGH = new Set(['campfire', 'lean_to', 'death_bag']);
 
 /**
  * Box colliders for placed structures (storage boxes, forge, smithy…), in the

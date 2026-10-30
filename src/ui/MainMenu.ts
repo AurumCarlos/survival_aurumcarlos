@@ -15,6 +15,8 @@ export interface MenuHandlers {
   onExportSlot(slot: string): void;
   onImport(file: File): void;
   onRefreshSaves(): void;
+  /** Game over with a bed: wake up next to it. */
+  onRespawn(): void;
   /** Pause menu: save the current world under a new name (a separate slot). */
   onSaveAs(name: string): void;
   onBack(): void;
@@ -32,6 +34,8 @@ export interface MenuModel {
   current: { slot: string; name: string } | null;
   loading: { fraction: number; label: string };
   deathCause: string | null;
+  /** The dead survivor has a bed to respawn at. */
+  canRespawn: boolean;
   minutesSurvived: number;
   /** True right after loading: the pause screen reads "Click to play" instead of "Paused". */
   freshSession: boolean;
@@ -163,8 +167,12 @@ export class MainMenu {
           <div class="menu-card">
             <h2>You died</h2>
             <p class="tag">${escapeHtml(m.deathCause ?? 'unknown causes')} · survived ${m.minutesSurvived.toFixed(1)} minutes</p>
-            <button data-act="new" class="primary">New game</button>
-            <button data-act="menu">Main menu</button>
+            ${m.canRespawn
+              ? `<button data-act="respawn" class="primary">Respawn at your bed<small>Your belongings stay in a bag where you fell</small></button>
+                 <button data-act="menu">Save &amp; main menu<small>You'll wake up at your bed next time</small></button>`
+              : `<p class="tag">No bed: this world is over. Build a bed to be able to respawn.</p>
+                 <button data-act="new" class="primary">New game</button>
+                 <button data-act="menu">Main menu</button>`}
           </div>`;
         break;
       case 'playing':
@@ -270,6 +278,7 @@ export class MainMenu {
       case 'menu': return this.h.onQuitToMenu();
       case 'cancel': return this.h.onCancelLoading();
       case 'resume': return this.h.onResume();
+      case 'respawn': return this.h.onRespawn();
       case 'save': return this.h.onSave();
       case 'quit': return this.h.onQuitToMenu();
       case 'dice': {

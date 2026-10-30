@@ -128,6 +128,8 @@ export interface Creature {
   perception: Perception;
   /** Facing angle on the XZ plane (radians). */
   heading: number;
+  /** Young animals grow from ~0.2 to 1 (adult). Undefined = adult. */
+  growth?: number;
 }
 export const Creature = defineComponent<Creature>('Creature');
 

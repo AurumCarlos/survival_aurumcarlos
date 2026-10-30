@@ -1,6 +1,6 @@
 import type { Entity, World } from '../core/ecs/World';
 import { SpatialHash } from '../core/SpatialHash';
-import { AIBrain, Creature, type CreatureSpecies } from '../components';
+import { AIBrain, Creature, Transform, type CreatureSpecies } from '../components';
 import { defaultApex } from '../systems/ai/ApexSystem';
 import type { ResourceKind } from '../data/schema';
 import { spawnCreature, spawnResource } from '../entities/factories';
@@ -105,7 +105,7 @@ export function spawnApexPredators(world: World, bundle: TerrainBundle, map: Map
     const a = defaultApex('swim');
     a.angle = ang;
     world.require(e, AIBrain).blackboard.apex = a;
-    world.require(e, Creature).heading = ang + Math.PI / 2;
+    faceHeading(world, e, ang + Math.PI / 2);
     out.push(e);
     n++;
   }
@@ -117,8 +117,16 @@ export function spawnApexPredators(world: World, bundle: TerrainBundle, map: Map
     const a = defaultApex('sleep');
     a.den = { x: c.x, y: c.y, z: c.z, yaw: c.yaw, length: c.length, width: c.width, height: c.height };
     world.require(e, AIBrain).blackboard.apex = a;
-    world.require(e, Creature).heading = c.yaw + Math.PI; // facing the entrance
+    faceHeading(world, e, c.yaw + Math.PI); // facing the entrance
     out.push(e);
   });
   return out;
+}
+
+/** Set heading and the matching rotation (current and previous), so the first rendered frame doesn't spin. */
+function faceHeading(world: World, e: Entity, heading: number): void {
+  world.require(e, Creature).heading = heading;
+  const t = world.require(e, Transform);
+  t.rotation = { x: 0, y: Math.sin(heading / 2), z: 0, w: Math.cos(heading / 2) };
+  t.prevRotation = { ...t.rotation };
 }

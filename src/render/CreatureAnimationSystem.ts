@@ -2,6 +2,7 @@ import type * as THREE from 'three';
 import type { Entity, System, World } from '../core/ecs/World';
 import { AIBrain, Creature, Transform } from '../components';
 import { RenderObject } from './Renderer';
+import { growthScale } from '../systems/ai/BreedingSystem';
 
 interface Rig {
   legs: THREE.Object3D[];
@@ -31,6 +32,7 @@ export class CreatureAnimationSystem implements System {
       if (!obj.visible) continue;
       const sp = world.require(e, Creature).species;
       if (sp === 'crocodile' || sp === 'bear') continue; // skeletal rigs: ApexAnimation
+      obj.scale.setScalar(growthScale(world.require(e, Creature))); // babies grow little by little
       let rig = this.rigs.get(e);
       if (!rig) {
         rig = {
@@ -49,7 +51,7 @@ export class CreatureAnimationSystem implements System {
       const raw = Math.hypot(t.position.x - t.prevPosition.x, t.position.z - t.prevPosition.z) * 60;
       rig.speed += (raw - rig.speed) * Math.min(1, dt * 8);
       rig.t += dt;
-      const stride = c.species === 'boar' ? 0.55 : c.species === 'wolf' ? 0.8 : 1.0; // metres per step
+      const stride = (c.species === 'boar' ? 0.55 : c.species === 'wolf' ? 0.8 : 1.0) * growthScale(c); // metres per step
       rig.phase += (rig.speed / stride) * Math.PI * dt;
       const run = Math.min(1, rig.speed / Math.max(0.1, c.runSpeed));
       const amp = Math.min(0.75, rig.speed * 0.22);

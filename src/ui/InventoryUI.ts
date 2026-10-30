@@ -253,7 +253,7 @@ export class InventoryUI {
         : `<p class="hint">${def.craftStation ? `Crafting station: its recipes unlock in the crafting menu (I) while you stand next to it.` : 'Keeps the rain off and holds some warmth in.'}</p>`}
       ${def.processes.length ? `<details class="makes"><summary>What it makes</summary>${def.processes.map((r) =>
         `<div>${r.inputs.map((i) => `${i.qty} ${esc(itemDef(i.item).name)}`).join(' + ')} → <b>${r.output.qty > 1 ? `${r.output.qty} ` : ''}${esc(itemDef(r.output.item).name)}</b> <small>${r.time}s</small></div>`).join('')}</details>` : ''}
-      <div class="box-actions"><button class="pickup" ${empty ? '' : 'disabled title="Empty it first"'}>Pick up</button></div>`;
+      ${def.kit ? `<div class="box-actions"><button class="pickup" ${empty ? '' : 'disabled title="Empty it first"'}>Pick up</button></div>` : '<p class="hint">Take everything back — the bag disappears once it is empty.</p>'}`;
     if (box) this.renderGrid(p.querySelector('.box-grid')!, box, (i) => this.transfer(i, false), false);
     p.querySelector('.light')?.addEventListener('click', () => {
       if (!this.stations.setLit(this.world, e, !h?.lit)) this.toast(`Put ${fuelNames.toLowerCase()} inside to light it`);

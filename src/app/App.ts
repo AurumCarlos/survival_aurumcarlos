@@ -48,7 +48,7 @@ export class App {
   /** Save slot of the world being played. */
   private current: SlotInfo | null = null;
   private model: MenuModel = {
-    save: null, saves: [], current: null, loading: { fraction: 0, label: '' }, deathCause: null, minutesSurvived: 0,
+    save: null, saves: [], current: null, loading: { fraction: 0, label: '' }, deathCause: null, canRespawn: false, minutesSurvived: 0,
     freshSession: true, busy: false, storageKind: null,
   };
 
@@ -77,6 +77,7 @@ export class App {
       onImport: (file) => void this.importFile(file),
       onRefreshSaves: () => void this.storeOp(async () => undefined),
       onSaveAs: (name) => void this.saveAs(name),
+      onRespawn: () => void this.respawn(),
       onContinue: () => void this.continueGame(),
       onCancelLoading: () => this.cancelLoading(),
       onResume: () => void this.resumePlay(),
@@ -236,7 +237,8 @@ export class App {
     this.session = s;
     this.lifecycle.loop = s.loop;
     s.loop.onPauseChange((paused, reasons) => {
-      this.input.setGameplayEnabled(!paused && !s.isInventoryOpen);
+      this.input.setGameplayEnabled(!paused);
+      this.input.setMovementOnly(s.isInventoryOpen);
       // Esc (pointer-lock exit) pauses the loop; mirror that in the app state.
       if (reasons.has('user') && this.machine.state === 'playing') this.machine.transition('paused');
     });
@@ -291,8 +293,21 @@ export class App {
     });
   }
 
+  /** Game over → wake up at the bed; the world is saved right away. */
+  private async respawn(): Promise<void> {
+    const s = this.session;
+    if (!s || this.machine.state !== 'gameover' || !s.respawn()) return;
+    this.model.freshSession = true;
+    this.machine.transition('paused');
+    await this.saveNow(true);
+  }
+
   private async quitToMenu(): Promise<void> {
     if (this.busy) return;
+    // Dead with a bed: respawn first so the save isn't a corpse (or a pre-death autosave).
+    if (this.machine.state === 'gameover' && this.session && this.model.canRespawn && this.session.respawn()) {
+      await this.saveNow(true);
+    }
     if (this.machine.state === 'paused' && this.session?.survivorAlive && !this.model.freshSession) {
       await this.saveNow(true);
     }
@@ -307,9 +322,10 @@ export class App {
     document.exitPointerLock();
     this.model.deathCause = cause;
     this.model.minutesSurvived = s.secondsSurvived / 60;
-    // Permadeath: this world's save would just reload a corpse. Other worlds are kept.
+    this.model.canRespawn = s.canRespawn;
+    // No bed: permadeath, this world's save would just reload a corpse. Other worlds are kept.
     const slot = this.current?.slot;
-    if (slot) void this.store?.delete(slot).then(() => this.refreshSaveSummary());
+    if (slot && !this.model.canRespawn) void this.store?.delete(slot).then(() => this.refreshSaveSummary());
     this.machine.transition('gameover');
   }
 
@@ -377,7 +393,9 @@ export class App {
     if (s.isInventoryOpen === open) return;
     this.lifecycle.uiOwnsPointer = open;
     s.setInventoryOpen(open, container);
-    this.input.setGameplayEnabled(!open);
+    // Panels don't stop you: keep walking while you craft or sort your bag.
+    this.input.setGameplayEnabled(true);
+    this.input.setMovementOnly(open);
     if (open) document.exitPointerLock();
     else this.input.requestPointerLock();
   }

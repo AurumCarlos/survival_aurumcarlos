@@ -498,6 +498,12 @@ export function structureObject(kind: string): THREE.Object3D {
       box(1.45, 0.1, 0.95, 0, 1.15, 0, 0x55595e, 0.04),
       paint(new THREE.CylinderGeometry(0.08, 0.08, 0.5, 6).translate(0.5, 1.45, -0.2), 0x55595e), // exhaust
     ])));
+    case 'death_bag': return mesh(cached('st:bag', () => merge([
+      paint(wobble(new THREE.SphereGeometry(0.32, 8, 6), 0.15, 3).scale(1, 0.8, 0.75).translate(0, 0.26, 0), 0x6b4a2f, 0.1), // leather sack
+      paint(new THREE.CylinderGeometry(0.1, 0.16, 0.14, 7).translate(0, 0.5, 0), 0x5a3d25, 0.08), // gathered neck
+      paint(new THREE.TorusGeometry(0.12, 0.02, 4, 10).rotateX(Math.PI / 2).translate(0, 0.5, 0), 0xc2a66a, 0.05), // cord
+      paint(new THREE.BoxGeometry(0.22, 0.16, 0.04).translate(0, 0.25, 0.25), 0x5a3d25, 0.06), // flap
+    ])));
     default: return mesh(cached('st:unknown', () => merge([box(0.6, 0.6, 0.6, 0, 0.3, 0, 0x9a8a6a)])));
   }
 }

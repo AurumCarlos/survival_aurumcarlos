@@ -46,7 +46,9 @@ export type ToolTag = 'axe' | 'pickaxe' | 'blade' | 'sickle';
 /** Things that can be put down in the world from the inventory. */
 export type PlaceableKind =
   | 'campfire' | 'lean_to' | 'storage_box' | 'large_storage_box' | 'mortar_pestle' | 'smithy'
-  | 'refining_forge' | 'cooking_pot' | 'preserving_bin' | 'fabricator';
+  | 'refining_forge' | 'cooking_pot' | 'preserving_bin' | 'fabricator'
+  /** What you were carrying when you died (left where you fell; vanishes once emptied). */
+  | 'death_bag';
 
 export interface ItemDef {
   id: ItemId;

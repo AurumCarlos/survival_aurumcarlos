@@ -368,9 +368,39 @@ cost 300 ms per step; compound bodies cost 0.5 ms.
   - Pause menu: *Save game* or *Save as new…*.
   - Dying deletes only that world's save. The save written on page close goes to the right world.
 
+## 11. Smooth predators, moving in menus, bed respawn, breeding
+
+- **Crocodile and bear animation fixes:**
+  - **Shaking and wrong facing:** the apex brain copied only the previous position, not the
+    previous rotation, so the renderer kept blending from a stale orientation every frame.
+  - **Left/right jitter:** when its target was right behind it, the creature flipped its turn
+    direction each tick. Turns now keep their direction (`ApexSystem.turn`).
+  - **Zigzag paths:** the bear's flow-field direction is now smoothed.
+  - **Stopping in the middle of nowhere:**
+    - The crocodile now swims around sandbanks with a sticky detour instead of pushing into them.
+    - A progress watchdog picks a new target when a crocodile or bear stops moving.
+    - When the flow field isn't built yet, the bear walks straight instead of freezing.
+    - The crocodile pauses to lurk less often and for less time.
+- **Move while a panel is open:** inventory, crafting, storage boxes and stations don't stop you.
+  Movement keys stay live (`Input.setMovementOnly`); clicks and other actions go to the UI. The
+  pause menu still pauses the game.
+- **Respawn at a bed:** if you have built a bed, dying shows "Respawn at your bed".
+  - Everything you carried (bag, hotbar, armour) stays in a bag where you fell; press E on it.
+    It disappears once it is empty.
+  - You wake up next to the bed you last slept in, at 70 health.
+  - The world's save is kept. Without a bed, death is still final for that world.
+- **Breeding** (`BreedingSystem`):
+  - Deer, boars and wolves with two adults close together have 1–3 babies near the mother every
+    so often, up to 1.4× the starting population. A species reduced to a single adult never comes
+    back.
+  - Babies are born at about 45 % of an adult's size and grow over 9–15 minutes. Size, health and
+    speed increase as they grow.
+  - Young wolves are timid and don't bite until they are more than half grown.
+  - A message tells you when one is born nearby. Growth is saved.
+
 ## Verification
 
-- `npm test`: 29 survival + 46 refactor + 52 island/building + 14 gameplay + 41 crafting/stations + 31 wildlife/terrain/saves + 29 world/physics checks (real cannon-es), all passing. They cover:
+- `npm test`: 29 survival + 46 refactor + 52 island/building + 14 gameplay + 41 crafting/stations + 43 wildlife/terrain/saves/respawn/breeding + 29 world/physics checks (real cannon-es), all passing. They cover:
   - flow fields: around a wall through a gap, and 40 random trips across the real forest with
     zero entries into blocked cells;
   - LOD: dormant creatures freeze and wake in place;

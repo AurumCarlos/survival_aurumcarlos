@@ -59,6 +59,8 @@ const STORAGE_KEY = 'survival.bindings.v2';
  * - Quote / Slash: Firefox Quick Find on QWERTY.
  * - Space / arrows / Tab: page scroll and focus changes.
  */
+const MOVEMENT_ACTIONS: ReadonlySet<Action> = new Set<Action>(['moveForward', 'moveBack', 'moveLeft', 'moveRight', 'sprint', 'crouch', 'jump']);
+
 const ALWAYS_PREVENT = /^(Digit\d|Numpad\d|Quote|Slash|Backquote|Space|Tab|Arrow(Up|Down|Left|Right))$/;
 
 export class InputManager {
@@ -70,6 +72,8 @@ export class InputManager {
   private mouseDY = 0;
   private wheel = 0;
   private enabled = true;
+  /** Inventory/crafting open: you can still walk, run, jump and crouch, but not act. */
+  private movementOnly = false;
 
   mouseSensitivity = 0.0022;
   invertY = false;
@@ -91,14 +95,14 @@ export class InputManager {
   // ---- Queries (call from systems) ----------------------------------------
 
   isDown(action: Action): boolean {
-    if (!this.enabled) return false;
+    if (!this.enabled || (this.movementOnly && !MOVEMENT_ACTIONS.has(action))) return false;
     for (const b of this.bindings[action]) if (this.down.has(b)) return true;
     return false;
   }
 
   /** True only on the frame the action was first pressed (edge-triggered). */
   wasPressed(action: Action): boolean {
-    if (!this.enabled) return false;
+    if (!this.enabled || (this.movementOnly && !MOVEMENT_ACTIONS.has(action))) return false;
     for (const b of this.bindings[action]) if (this.pressedThisFrame.has(b)) return true;
     return false;
   }
@@ -141,6 +145,14 @@ export class InputManager {
   setGameplayEnabled(enabled: boolean): void {
     this.enabled = enabled;
     if (!enabled) this.mouseDX = this.mouseDY = 0;
+  }
+
+  /**
+   * While a panel (inventory, crafting, a storage box) is open the player can
+   * keep moving: only movement actions are live, clicks go to the UI.
+   */
+  setMovementOnly(on: boolean): void {
+    this.movementOnly = on;
   }
 
   /** UI-level check that works even while gameplay input is disabled. */

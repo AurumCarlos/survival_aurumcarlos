@@ -64,6 +64,16 @@ export const BEAR = {
 export class ApexSystem implements System {
   readonly name = 'apex';
   private readonly dir = { x: 0, z: 0 };
+  /** Entity being updated (for the per-creature steering memory below). */
+  private current: Entity = -1;
+  /** Which way each creature was turning: keeps it from flip-flopping when its target is right behind it. */
+  private readonly turnSign = new Map<Entity, number>();
+  /** Low-passed path direction, so following the grid-based flow field doesn't zigzag. */
+  private readonly smoothDir = new Map<Entity, { x: number; z: number }>();
+  /** Progress watchdog: where it was, and for how long it hasn't really moved. */
+  private readonly stuck = new Map<Entity, { x: number; z: number; t: number }>();
+  /** Crocodile going round a sandbank: which side, for how much longer, which way. */
+  private readonly detour = new Map<Entity, { side: number; t: number; heading: number }>();
 
   constructor(private readonly s: ApexServices) {}
 
@@ -76,9 +86,18 @@ export class ApexSystem implements System {
       const brain = world.require(e, AIBrain);
       const a = (brain.blackboard.apex ??= defaultApex(k.species === 'crocodile' ? 'swim' : 'sleep'));
       const t = world.require(e, Transform);
+      // Snapshot BOTH position and rotation for render interpolation. Only the
+      // position used to be copied: the renderer then blended the rotation
+      // from a stale "previous" one every frame — the shaking and the wrong
+      // facing direction.
       t.prevPosition.x = t.position.x;
       t.prevPosition.y = t.position.y;
       t.prevPosition.z = t.position.z;
+      t.prevRotation.x = t.rotation.x;
+      t.prevRotation.y = t.rotation.y;
+      t.prevRotation.z = t.rotation.z;
+      t.prevRotation.w = t.rotation.w;
+      this.current = e;
       a.t += dt;
       a.cooldown = Math.max(0, a.cooldown - dt);
       if (k.species === 'crocodile') this.crocodile(world, e, a, player, dt);
@@ -127,7 +146,7 @@ export class ApexSystem implements System {
           break;
         }
         if (a.mode === 'lurk') {
-          if (a.t > 4 + (e % 4)) {
+          if (a.t > 2 + (e % 3)) {
             a.angle += 0.35 + ((e * 0.137) % 0.3);
             a.target = this.patrolPoint(a.angle, e);
             set('swim');
@@ -135,7 +154,17 @@ export class ApexSystem implements System {
           break;
         }
         if (!a.target) a.target = this.patrolPoint(a.angle, e);
-        if (this.moveTo(k, p, a.target.x, a.target.z, CROC.swimSpeed, 1.6, dt, true) < 1.5) set('lurk');
+        const left = this.moveTo(k, p, a.target.x, a.target.z, CROC.swimSpeed, 1.6, dt, true);
+        if (left < 2.5) {
+          // Mostly keeps cruising along the shore; now and then floats still for a moment.
+          a.angle += 0.35 + ((e * 0.137) % 0.3);
+          a.target = this.patrolPoint(a.angle, e);
+          if ((Math.floor(a.angle * 10) + e) % 3 === 0) set('lurk');
+        } else if (this.isStuck(p, dt, 2.5, true)) {
+          // Wedged against a sandbank: pick a point further along and further out.
+          a.angle += 0.7;
+          a.target = this.patrolPoint(a.angle, e + 3);
+        }
         break;
       }
       case 'stalk': {
@@ -148,7 +177,11 @@ export class ApexSystem implements System {
         }
         this.moveTo(k, p, pp.x, pp.z, inWater ? CROC.stalkSpeed : CROC.crawlSpeed, 2.2, dt, false);
         if (d < CROC.lungeRange && a.cooldown === 0) set('lunge');
-        if (!inWater) set('crawl');
+        else if (!inWater) set('crawl');
+        else if (this.isStuck(p, dt, 3, true)) {
+          a.target = this.waterPoint(p.x, p.z, 6);
+          set('return');
+        }
         break;
       }
       case 'crawl': {
@@ -160,7 +193,11 @@ export class ApexSystem implements System {
         }
         this.moveTo(k, p, pp.x, pp.z, CROC.crawlSpeed, 1.8, dt, false);
         if (d < CROC.lungeRange * 0.6 && a.cooldown === 0) set('lunge');
-        if (inWater) set('stalk');
+        else if (inWater) set('stalk');
+        else if (this.isStuck(p, dt, 2, true)) {
+          a.target = this.waterPoint(p.x, p.z, 6);
+          set('return');
+        }
         break;
       }
       case 'lunge': {
@@ -185,8 +222,10 @@ export class ApexSystem implements System {
         break;
       case 'return': {
         if (!a.target) a.target = this.waterPoint(p.x, p.z, 8);
-        const left = this.moveTo(k, p, a.target.x, a.target.z, CROC.returnSpeed, 1.8, dt, true);
-        if (left < 2 || (inWater && a.t > 12)) {
+        // Back to the water: on land it may crawl (stayWet = false) until it is in.
+        const left = this.moveTo(k, p, a.target.x, a.target.z, CROC.returnSpeed, 1.8, dt, inWater);
+        if (this.isStuck(p, dt, 3, true)) a.target = this.patrolPoint(Math.atan2(p.z, p.x) + 0.4, e + 7);
+        if (left < 2.5 || (inWater && a.t > 12)) {
           a.angle = Math.atan2(p.z, p.x);
           a.target = null;
           set(hurt ? 'lurk' : 'swim');
@@ -209,12 +248,12 @@ export class ApexSystem implements System {
     const cx = Math.cos(angle), cz = Math.sin(angle);
     let first = -1;
     for (let r = this.s.half * 0.2; r < this.s.half - 3; r += 1) {
-      if (this.s.terrainHeight(cx * r, cz * r) < W - 0.7) {
+      if (this.s.terrainHeight(cx * r, cz * r) < W - 0.8) {
         first = r;
         break;
       }
     }
-    const r = first < 0 ? this.s.half * 0.85 : Math.min(this.s.half - 3, first + 1 + ((seed * 7.31) % 5));
+    const r = first < 0 ? this.s.half * 0.85 : Math.min(this.s.half - 3, first + 2 + ((seed * 7.31) % 4));
     return { x: cx * r, y: W, z: cz * r };
   }
 
@@ -229,19 +268,70 @@ export class ApexSystem implements System {
    */
   private moveTo(k: Creature, p: Vec3, tx: number, tz: number, speed: number, turnRate: number, dt: number, stayWet: boolean): number {
     const dist = Math.hypot(tx - p.x, tz - p.z);
-    const desired = Math.atan2(tx - p.x, tz - p.z);
-    const diff = wrapAngle(desired - k.heading);
-    k.heading = wrapAngle(k.heading + Math.max(-turnRate * dt, Math.min(turnRate * dt, diff)));
+    const W = this.s.waterLevel;
+    const limit = stayWet ? W - 0.3 : W + CROC.maxLandHeight;
+    const ok = (x: number, z: number): boolean =>
+      this.s.terrainHeight(x, z) <= limit && Math.abs(x) < this.s.half - 2 && Math.abs(z) < this.s.half - 2;
+    let desired = Math.atan2(tx - p.x, tz - p.z);
+    // Look 2.5 m ahead: if the shore (or the map edge) is in the way, swim
+    // around it along the closest free direction instead of pushing into it.
+    // Once it picks a side it sticks to it for a moment, so it follows the
+    // shoreline smoothly instead of hesitating left/right.
+    let det = this.detour.get(this.current);
+    if (det && det.t > 0) det.t -= dt;
+    if (!ok(p.x + Math.sin(desired) * 2.5, p.z + Math.cos(desired) * 2.5)) {
+      const side = det?.side ?? (wrapAngle(desired - k.heading) >= 0 ? 1 : -1);
+      for (const off of AVOID) {
+        const h = desired + Math.abs(off) * (off > 0 ? side : -side);
+        if (ok(p.x + Math.sin(h) * 2.5, p.z + Math.cos(h) * 2.5)) {
+          desired = h;
+          this.detour.set(this.current, (det = { side: off > 0 ? side : -side, t: 1.2, heading: h }));
+          break;
+        }
+      }
+    } else if (det && det.t > 0 && ok(p.x + Math.sin(det.heading) * 2.5, p.z + Math.cos(det.heading) * 2.5)) {
+      desired = det.heading; // finish going round before heading straight again
+    } else if (det) {
+      this.detour.delete(this.current);
+    }
+    const diff = this.turn(k, desired, turnRate, dt);
     const s = speed * Math.max(0.3, Math.cos(Math.min(Math.abs(diff), Math.PI / 2)));
     const nx = p.x + Math.sin(k.heading) * s * dt, nz = p.z + Math.cos(k.heading) * s * dt;
-    const W = this.s.waterLevel;
-    const g = this.s.terrainHeight(nx, nz);
-    const limit = stayWet ? W - 0.3 : W + CROC.maxLandHeight;
-    if (g <= limit && Math.abs(nx) < this.s.half - 2 && Math.abs(nz) < this.s.half - 2) {
+    if (ok(nx, nz)) {
       p.x = nx;
       p.z = nz;
     }
     return dist;
+  }
+
+  /**
+   * Turn toward `desired` at `rate`. When the target is (nearly) straight
+   * behind, keep turning the same way as before instead of flipping left/right
+   * every tick — that flip-flop was the vibration. Returns the remaining angle.
+   */
+  private turn(k: Creature, desired: number, rate: number, dt: number): number {
+    let diff = wrapAngle(desired - k.heading);
+    const sign = this.turnSign.get(this.current) ?? 1;
+    if (Math.abs(diff) > 2.6 && Math.sign(diff) !== sign) diff = sign * (Math.PI * 2 - Math.abs(diff));
+    if (Math.abs(diff) > 0.05) this.turnSign.set(this.current, Math.sign(diff));
+    k.heading = wrapAngle(k.heading + Math.max(-rate * dt, Math.min(rate * dt, diff)));
+    return diff;
+  }
+
+  /** True if the creature hasn't moved 1 m in `seconds` (it is stuck somewhere). */
+  private isStuck(p: Vec3, dt: number, seconds: number, moving: boolean): boolean {
+    let s = this.stuck.get(this.current);
+    if (!s) this.stuck.set(this.current, (s = { x: p.x, z: p.z, t: 0 }));
+    if (!moving || Math.hypot(p.x - s.x, p.z - s.z) > 1) {
+      s.x = p.x;
+      s.z = p.z;
+      s.t = 0;
+      return false;
+    }
+    s.t += dt;
+    if (s.t < seconds) return false;
+    s.t = 0;
+    return true;
   }
 
   // ---- bear -----------------------------------------------------------------
@@ -286,14 +376,23 @@ export class ApexSystem implements System {
           }
         } else if (a.mode === 'roam') {
           const left = a.target ? this.walk(k, p, a.target.x, a.target.z, BEAR.walkSpeed, dt) : 0;
-          if (left < 1.5 || a.t > 30) {
+          if (left < 1.5 || this.isStuck(p, dt, 4, true)) {
             if (this.s.isNight() && a.t < 90) {
-              const ang = (e * 1.9 + a.t) % (Math.PI * 2);
-              a.target = { x: mouth.x - ax * 8 + Math.cos(ang) * 7, y: 0, z: mouth.z - az * 8 + Math.sin(ang) * 7 };
+              // Next stroll point near the entrance — only ones it can actually walk to.
+              for (let tries = 0; tries < 8; tries++) {
+                const ang = (e * 1.9 + a.t * 3.1 + tries * 0.9) % (Math.PI * 2);
+                const x = mouth.x - ax * 8 + Math.cos(ang) * 7, z = mouth.z - az * 8 + Math.sin(ang) * 7;
+                if (this.s.paths.isWalkable(x, z)) {
+                  a.target = { x, y: 0, z };
+                  break;
+                }
+              }
             } else set('home');
           }
         } else {
-          if (this.walk(k, p, home.x, home.z, BEAR.walkSpeed, dt) < 1.2) set('sleep');
+          const left = this.walk(k, p, home.x, home.z, BEAR.walkSpeed, dt);
+          // Home, or blocked inside its own cave a few metres short: lie down where it is.
+          if (left < 1.2 || (this.isStuck(p, dt, 4, true) && cave && insideCave(cave, p.x, p.z))) set('sleep');
         }
         break;
       case 'wake':
@@ -321,6 +420,8 @@ export class ApexSystem implements System {
           else this.faceToward(k, p, pp.x, pp.z, 4, dt);
         } else {
           this.walk(k, p, pp.x, pp.z, BEAR.chargeSpeed, dt);
+          // Can't reach you (up on a roof, behind a wall): gives up after a while.
+          if (this.isStuck(p, dt, 6, true)) set('home');
         }
         break;
       }
@@ -345,8 +446,22 @@ export class ApexSystem implements System {
     const dist = Math.hypot(tx - p.x, tz - p.z);
     if (dist < 0.3) return dist;
     const paths = this.s.paths;
-    if (!paths.steer(p.x, p.z, tx, tz, this.dir)) return dist;
-    this.faceToward(k, p, p.x + this.dir.x, p.z + this.dir.z, 3.5, dt);
+    if (!paths.steer(p.x, p.z, tx, tz, this.dir)) {
+      // No flow field yet (still being built) or no route: head straight for it
+      // rather than freezing on the spot.
+      this.dir.x = (tx - p.x) / dist;
+      this.dir.z = (tz - p.z) / dist;
+    }
+    // Smooth the grid-based direction so it walks in curves, not zigzags.
+    let sd = this.smoothDir.get(this.current);
+    if (!sd) this.smoothDir.set(this.current, (sd = { x: this.dir.x, z: this.dir.z }));
+    const kk = 1 - Math.exp(-dt * 6);
+    sd.x += (this.dir.x - sd.x) * kk;
+    sd.z += (this.dir.z - sd.z) * kk;
+    const len = Math.hypot(sd.x, sd.z) || 1;
+    this.dir.x = sd.x / len;
+    this.dir.z = sd.z / len;
+    this.turn(k, Math.atan2(this.dir.x, this.dir.z), 3.5, dt);
     const diff = Math.abs(wrapAngle(Math.atan2(this.dir.x, this.dir.z) - k.heading));
     const s = speed * Math.max(0.25, Math.cos(Math.min(diff, Math.PI / 2)));
     const nx = p.x + Math.sin(k.heading) * s * dt, nz = p.z + Math.cos(k.heading) * s * dt;
@@ -359,8 +474,8 @@ export class ApexSystem implements System {
   }
 
   private faceToward(k: Creature, p: Vec3, tx: number, tz: number, rate: number, dt: number): void {
-    const diff = wrapAngle(Math.atan2(tx - p.x, tz - p.z) - k.heading);
-    k.heading = wrapAngle(k.heading + Math.max(-rate * dt, Math.min(rate * dt, diff)));
+    if (Math.hypot(tx - p.x, tz - p.z) < 0.4) return; // too close to have a direction: don't spin
+    this.turn(k, Math.atan2(tx - p.x, tz - p.z), rate, dt);
   }
 
   private hurtPlayer(world: World, player: Entity, k: Creature, bleedChance: number): void {
@@ -372,6 +487,9 @@ export class ApexSystem implements System {
     this.s.events.emit('player:damaged', { entity: player, amount: dmg, source: k.species });
   }
 }
+
+/** Detour angles tried (in order) when the way ahead is blocked. */
+const AVOID = [0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.1, -2.1];
 
 export function defaultApex(mode: ApexMode): ApexState {
   return { mode, t: 0, cooldown: 0, angle: 0, landTime: 0, target: null, den: null };

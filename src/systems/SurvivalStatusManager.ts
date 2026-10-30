@@ -188,7 +188,8 @@ export class SurvivalStatusManager {
 
     if (v.health <= 0) {
       s.alive = false;
-      result.died = worst ?? 'starvation';
+      // No environmental cause: health was taken by an animal's attack.
+      result.died = worst ?? 'combat';
     }
 
     // ---- 6. Derived modifiers -------------------------------------------

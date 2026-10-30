@@ -19,6 +19,12 @@ import { SurvivalStatusManager } from '../src/systems/SurvivalStatusManager';
 import { parseMapConfig, toTerrainConfig } from '../src/world/MapConfig';
 import { BIOME, GENERATOR_VERSION, generateTerrain, insideCave, sampleHeight, sampleSlope, ISLAND, type TerrainData } from '../src/world/TerrainGenerator';
 import { populateResources, spawnApexPredators } from '../src/world/WorldPopulator';
+import { Structure } from '../src/components';
+import { BuildingGrid } from '../src/systems/building/BuildingGrid';
+import { InventoryGrid } from '../src/systems/inventory/InventoryGrid';
+import { StationSystem } from '../src/systems/StationSystem';
+import { bedSpawnPoint, chooseBed, dropBelongings, revive } from '../src/systems/Respawn';
+import { BREED_TUNING, BreedingSystem, applyGrowth, growthScale } from '../src/systems/ai/BreedingSystem';
 
 declare const process: { exit(code: number): never };
 let failures = 0;
@@ -147,7 +153,27 @@ async function main(): Promise<void> {
       modes.add(world.require(croc, AIBrain).blackboard.apex!.mode);
     }
     check('alone, it patrols and lurks in the lagoon without leaving the water', maxGround < t.cfg.waterLevel - 0.25 && modes.has('swim') && modes.has('lurk'), [...modes].join(', '));
-    check('it floats with only its eyes and back above the surface', Math.abs(cp.y - (t.cfg.waterLevel - 0.55)) < 0.1);
+    check('it floats with only its eyes and back above the surface (or rests on a sandbank)', Math.abs(cp.y - Math.max(sampleHeight(t, cp.x, cp.z), t.cfg.waterLevel - 0.55)) < 0.15);
+    // Patrolling for 3 minutes: it keeps moving (no long stops) and never jitters
+    // back and forth (heading reversals tick to tick).
+    {
+      let still = 0, maxStill = 0, flips = 0, lastTurn = 0;
+      const k = world.require(croc, Creature);
+      for (let i = 0; i < 60 * 180; i++) {
+        const x0 = cp.x, z0 = cp.z, h0 = k.heading;
+        apex.fixedUpdate(world, 1 / 60);
+        const mode = world.require(croc, AIBrain).blackboard.apex!.mode;
+        if (Math.hypot(cp.x - x0, cp.z - z0) < 0.001 && mode !== 'lurk') still++;
+        else still = 0;
+        maxStill = Math.max(maxStill, still);
+        const dh = Math.atan2(Math.sin(k.heading - h0), Math.cos(k.heading - h0));
+        const turn = Math.abs(dh) < 0.004 ? 0 : Math.sign(dh); // ignore sub-0.25° corrections
+        if (turn !== 0 && lastTurn !== 0 && turn !== lastTurn) flips++;
+        if (turn !== 0) lastTurn = turn;
+      }
+      check('it keeps swimming: never stuck more than 2 s outside its lurking pauses', maxStill < 120, `${(maxStill / 60).toFixed(1)} s`);
+      check('no left/right flip-flopping (the vibration)', flips < 60, `${flips} reversals in 3 min`);
+    }
     // A swimmer nearby: it stalks, lunges and bites.
     const pp = world.require(player, Transform).position;
     const ang = Math.atan2(cp.z, cp.x);
@@ -221,6 +247,118 @@ async function main(): Promise<void> {
     applySnapshot(B, snap, populateResources(B, bundle), new DayNightCycle(DEFAULT_DAY_NIGHT));
     const restored = [...B.query(Creature)].find((e) => B.require(e, Creature).species === 'bear');
     check('saves keep bears and crocodiles with their den and mode', !!restored && B.require(restored, AIBrain).blackboard.apex?.den?.yaw === c.yaw);
+  }
+
+  console.log('\n── Smooth movement of the crocodile and the bear ──');
+  {
+    const t = t256!;
+    const map = parseMapConfig({ size: 256, seed: 777, gen: 2 });
+    const bundle = { terrain: t, nav: buildNavGrid(t) };
+    const world = new World();
+    const nav = new NavGrid(bundle.nav);
+    const ents = spawnApexPredators(world, bundle, map, []);
+    const apex = new ApexSystem({
+      terrainHeight: (x, z) => sampleHeight(t, x, z), groundHeight: (x, z) => sampleHeight(t, x, z), waterLevel: t.cfg.waterLevel,
+      paths: new FlowFieldService(nav), isNight: () => false, survival: new SurvivalStatusManager(), events: new EventBus(), half: 128,
+    });
+    spawnPlayer(world, { x: 0, y: 30, z: 0 });
+    let stale = 0;
+    for (let i = 0; i < 600; i++) {
+      apex.fixedUpdate(world, 1 / 60);
+      for (const e of ents) {
+        const tr = world.require(e, Transform);
+        // The renderer blends prevRotation → rotation: both must be fresh, and close.
+        const dot = Math.abs(tr.prevRotation.x * tr.rotation.x + tr.prevRotation.y * tr.rotation.y + tr.prevRotation.z * tr.rotation.z + tr.prevRotation.w * tr.rotation.w);
+        if (dot < 0.999) stale++;
+      }
+    }
+    check('render interpolation gets a fresh previous rotation every step (no shaking, faces where it goes)', stale === 0, `${stale} stale rotations`);
+    // A charging bear chasing a moving player: no left/right flip-flop.
+    const bear = ents.find((e) => world.require(e, Creature).species === 'bear')!;
+    const c = t.caves![0]!;
+    const player = [...world.query(PlayerControlled)][0]!;
+    const pp = world.require(player, Transform).position;
+    const ax = Math.sin(c.yaw), az = Math.cos(c.yaw);
+    world.require(bear, AIBrain).blackboard.apex!.mode = 'charge';
+    let flips = 0, last = 0;
+    const k = world.require(bear, Creature);
+    for (let i = 0; i < 60 * 8; i++) {
+      const s = i / 60;
+      pp.x = c.x - ax * (c.length / 2 + 4 + s * 2) + Math.sin(s) * 3;
+      pp.z = c.z - az * (c.length / 2 + 4 + s * 2) + Math.cos(s) * 3;
+      pp.y = sampleHeight(t, pp.x, pp.z);
+      const h0 = k.heading;
+      apex.fixedUpdate(world, 1 / 60);
+      const dh = Math.atan2(Math.sin(k.heading - h0), Math.cos(k.heading - h0));
+      const turn = Math.abs(dh) < 0.004 ? 0 : Math.sign(dh);
+      if (turn && last && turn !== last) flips++;
+      if (turn) last = turn;
+    }
+    check('a charging bear runs in smooth curves', flips < 25, `${flips} reversals in 8 s`);
+  }
+
+  console.log('\n── Respawn at a bed ──');
+  {
+    const grid = new BuildingGrid({ heightAt: () => 1, staticBlocked: () => false, waterLevel: -5 });
+    check('no bed → no respawn', chooseBed(grid, null) === null);
+    grid.insert({ id: 1, kind: 'foundation', i: 0, j: 0, y: 1.4 });
+    grid.insert({ id: 2, kind: 'bed', i: 0, j: 0, y: 1.4, side: 'n' });
+    const world = new World();
+    const p = spawnPlayer(world, { x: 40, y: 1, z: 40 });
+    const s = world.require(p, SurvivorC);
+    const inv = new InventoryGrid(s.inventory);
+    inv.add('wood', 30);
+    inv.add('metal_ingot', 5);
+    s.hotbar[0] = { item: 'stone_axe', qty: 1, durability: 50 };
+    s.equipped.body = { item: 'hide_armor', qty: 1 };
+    s.vitals.health = 0;
+    s.alive = false;
+    const bag = dropBelongings(world, p, { x: 40, y: 1, z: 40 });
+    const bagInv = new InventoryGrid(world.require(bag!, Structure).container!);
+    check('dying leaves everything in a bag where you fell', bagInv.count('wood') === 30 && bagInv.count('stone_axe') === 1 && bagInv.count('hide_armor') === 1 && inv.placements.length === 0 && s.hotbar.every((h) => h === null));
+    const bed = chooseBed(grid, null)!;
+    const at = bedSpawnPoint(bed);
+    revive(world, p, at);
+    check('you wake up next to the bed, alive, with fresh vitals', s.alive && s.vitals.health === 70 && Math.abs(at.y - 1.4) < 1e-6 && Math.hypot(at.x - 1.5, at.z - 1.5) < 2.2);
+    const st = new StationSystem(new EventBus());
+    bagInv.remove('wood', 30); bagInv.remove('metal_ingot', 5); bagInv.remove('stone_axe', 1); bagInv.remove('hide_armor', 1);
+    st.fixedUpdate(world, 0.1);
+    world.flush();
+    check('the empty bag disappears', !world.get(bag!, Structure));
+  }
+
+  console.log('\n── Animals breed; babies grow up ──');
+  {
+    const world = new World();
+    const events = new EventBus();
+    let seed = 3;
+    const rng = (): number => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    const breed = new BreedingSystem(events, { deer: 4, wolf: 2 }, () => true, () => 0, rng);
+    const d1 = spawnCreature(world, 'deer', { x: 0, y: 0, z: 0 }, 1);
+    spawnCreature(world, 'deer', { x: 5, y: 0, z: 0 }, 2);
+    spawnCreature(world, 'wolf', { x: 50, y: 0, z: 0 }, 3); // a lone wolf: can't breed
+    let born = 0;
+    events.on('creature:born', () => born++);
+    const run = (sec: number): void => { for (let t = 0; t < sec; t += 1) breed.fixedUpdate(world, 1); };
+    run(BREED_TUNING.interval * 12);
+    const deer = [...world.query(Creature)].filter((e) => world.require(e, Creature).species === 'deer');
+    const wolves = [...world.query(Creature)].filter((e) => world.require(e, Creature).species === 'wolf');
+    check('two adult deer have fawns, up to the population cap', born > 0 && deer.length > 2 && deer.length <= Math.round(4 * BREED_TUNING.capFactor), `${deer.length} deer`);
+    check('a lone wolf has no pups', wolves.length === 1);
+    const baby = deer.find((e) => world.require(e, Creature).growth !== undefined) ?? deer.find((e) => e !== d1)!;
+    world.require(baby, Creature).growth = BREED_TUNING.birthGrowth;
+    applyGrowth(world, baby);
+    const small = { scale: growthScale(world.require(baby, Creature)), hp: world.require(baby, Creature).maxHealth };
+    run(300);
+    const mid = growthScale(world.require(baby, Creature));
+    run(400);
+    const kb = world.require(baby, Creature);
+    check('babies are born small and grow little by little into adults', small.scale < 0.5 && mid > small.scale && mid < 1 && kb.growth === undefined && kb.maxHealth === 40,
+      `scale ${small.scale.toFixed(2)} → ${mid.toFixed(2)} → 1, hp ${small.hp} → ${kb.maxHealth}`);
+    const pup = spawnCreature(world, 'wolf', { x: 60, y: 0, z: 0 }, 9);
+    world.require(pup, Creature).growth = 0.3;
+    applyGrowth(world, pup);
+    check('a wolf pup is timid and harmless until it grows', world.require(pup, Creature).attackDamage === 0 && world.require(pup, AIBrain).tree === 'prey');
   }
 
   console.log('\n── Several saves ──');

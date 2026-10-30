@@ -53,7 +53,7 @@ console.log('\n── ARK resources and recipes ──');
     'silica_pearls', 'black_pearl', 'sulfur', 'charcoal', 'sparkpowder', 'gunpowder', 'cementing_paste', 'polymer', 'electronics', 'gasoline',
     'narcotic', 'stimulant', 'raw_prime_meat', 'raw_fish', 'jerky', 'amarberry', 'azulberry', 'tintoberry', 'narcoberry', 'stimberry', 'rare_flower', 'rare_mushroom'];
   check(`ARK base resources present (${ark.length})`, ark.every((id) => known.has(id)));
-  check('every placeable has a recipe', PLACEABLE_KINDS.every((k) => RECIPES.some((r) => r.output.item === STRUCTURES[k].kit)));
+  check('every placeable has a recipe', PLACEABLE_KINDS.every((k) => STRUCTURES[k].kit === null || RECIPES.some((r) => r.output.item === STRUCTURES[k].kit)));
   check(`${RECIPES.length} crafting recipes, ${PLACEABLE_KINDS.reduce((n, k) => n + STRUCTURES[k].processes.length, 0)} cooking/smelting recipes`, RECIPES.length >= 35);
 }
 

@@ -57,6 +57,12 @@ export class StationSystem implements System {
       const st = world.require(e, Structure);
       const def = STRUCTURES[st.kind];
       if (!st.container) continue;
+      if (st.kind === 'death_bag' && st.container.placements.length === 0) {
+        // Everything recovered: the bag disappears.
+        this.events.emit('structure:removed', { entity: e });
+        world.destroy(e);
+        continue;
+      }
       const h = world.get(e, HeatSource);
       if (def.fuel && h?.lit && h.fuelSeconds < REFUEL_MARGIN) this.refuel(world, e);
 

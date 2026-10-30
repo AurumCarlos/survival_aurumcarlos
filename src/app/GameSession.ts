@@ -31,6 +31,8 @@ import { ResourceVisualSystem, bindEntityVisuals, buildWorldVisuals, type BuildO
 import { AILodSystem } from '../systems/ai/AILodSystem';
 import { AISystem } from '../systems/ai/AISystem';
 import { ApexSystem } from '../systems/ai/ApexSystem';
+import { BreedingSystem } from '../systems/ai/BreedingSystem';
+import { creatureBudget } from '../world/MapConfig';
 import { ApexAnimation } from '../render/ApexAnimation';
 import { FlowFieldService } from '../systems/ai/nav/FlowFieldService';
 import { NoiseBus } from '../systems/ai/NoiseBus';
@@ -45,6 +47,7 @@ import { PlayerControlSystem } from '../systems/PlayerControlSystem';
 import { SurvivalSystem } from '../systems/SurvivalSystem';
 import { SleepSystem } from '../systems/SleepSystem';
 import { StationSystem } from '../systems/StationSystem';
+import { bedSpawnPoint, chooseBed, dropBelongings, revive } from '../systems/Respawn';
 import { StructureInteraction } from '../systems/StructureInteraction';
 import { HUD } from '../ui/HUD';
 import { InventoryUI } from '../ui/InventoryUI';
@@ -52,6 +55,8 @@ import type { MapConfig } from '../world/MapConfig';
 import type { TerrainBundle } from '../world/TerrainCodec';
 import { insideCave, sampleHeight } from '../world/TerrainGenerator';
 import { populateResources, spawnApexPredators, spawnInitialCreatures, type PopulatedWorld } from '../world/WorldPopulator';
+
+const BABY_NAME: Record<string, string> = { deer: 'deer (fawn)', boar: 'boar (piglet)', wolf: 'wolf (pup)' };
 
 export interface SessionDeps {
   renderer: Renderer;
@@ -98,6 +103,8 @@ export class GameSession {
   private readonly stations: StationSystem;
   private readonly structures: StructureInteraction;
   private structurePhysics: StructurePhysics | null = null;
+  /** Bed the player last slept in (respawn point). */
+  private lastBed: number | null = null;
   /** Structure the player pressed E on; App opens the inventory with it. */
   private openRequest: Entity | null = null;
 
@@ -188,6 +195,16 @@ export class GameSession {
     });
     this.interaction.blocked = () => this.structures.focused !== null;
     events.on('structure:open', ({ entity }) => (this.openRequest = entity));
+    // Respawn: remember the bed you last used; on death, leave your things where you fell.
+    events.on('player:sleep-request', ({ bed }) => (this.lastBed = bed));
+    events.on('survivor:died', ({ entity }) => {
+      if (!this.canRespawn) return;
+      const bag = dropBelongings(world, entity, world.require(entity, Transform).position);
+      if (bag !== null) {
+        bindEntityVisuals(world, d.renderer.scene, d.assets);
+        events.emit('structure:placed', { entity: bag });
+      }
+    });
     this.structurePhysics = new StructurePhysics(world, this.physics, events);
 
     const caves = terrain.caves ?? [];
@@ -237,8 +254,16 @@ export class GameSession {
         waterLevel: terrain.cfg.waterLevel, paths: this.paths, isNight: () => this.cycle.isNight,
         survival: survival.manager, events, half: terrain.cfg.size / 2,
       }))
+      .addSystem(new BreedingSystem(events, creatureBudget(d.map), (x, z) => this.populated.nav.isWalkable(x, z), (x, z) => sampleHeight(terrain, x, z)))
       .addSystem(this.crafting)
       .addSystem(survival);
+    events.on('creature:born', ({ entity, species }) => {
+      if (this.disposed) return;
+      bindEntityVisuals(world, d.renderer.scene, d.assets);
+      const bp = world.get(entity, Transform)?.position;
+      const pp = world.require(this.player, Transform).position;
+      if (bp && Math.hypot(bp.x - pp.x, bp.z - pp.z) < 45) events.emit('ui:toast', { text: `A baby ${BABY_NAME[species] ?? species} was born nearby` });
+    });
 
     // Beds: E on a bed at night fast-forwards to morning through these systems.
     new SleepSystem(world, events, this.cycle, [this.stations, environment, this.interaction, this.crafting, survival]);
@@ -303,6 +328,26 @@ export class GameSession {
 
   get isInventoryOpen(): boolean {
     return this.inventory.isOpen;
+  }
+
+  /** A bed exists: death isn't the end of this world. */
+  get canRespawn(): boolean {
+    return chooseBed(this.buildings, this.lastBed) !== null;
+  }
+
+  /** Wake up next to your bed after dying. Returns false if there is no bed any more. */
+  respawn(): boolean {
+    const bed = chooseBed(this.buildings, this.lastBed);
+    if (!bed) return false;
+    const at = bedSpawnPoint(bed);
+    revive(this.world, this.player, at);
+    const { body } = this.world.require(this.player, PhysicsBody);
+    body.position.set(at.x, at.y + PLAYER_SHAPE.height / 2 + 0.05, at.z);
+    body.velocity.set(0, 0, 0);
+    this.events.emit('inventory:changed', { entity: this.player });
+    this.events.emit('ui:toast', { text: 'You wake up in your bed. Your belongings are where you fell.' });
+    this.loop.resume('dead');
+    return true;
   }
 
   /** E was pressed on a structure: the App opens the inventory showing it. */
@@ -385,6 +430,7 @@ export class GameSession {
     if (!st) return null;
     if (st.container && st.container.placements.length > 0) return 'Empty it first';
     const def = STRUCTURES[st.kind];
+    if (!def.kit) return "This can't be picked up";
     if (this.crafting.inventoryOf(this.world, this.player).add(def.kit, 1) > 0) return `No room for the ${itemDef(def.kit).name}`;
     this.events.emit('structure:removed', { entity: e });
     this.world.destroy(e);
