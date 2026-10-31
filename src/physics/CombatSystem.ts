@@ -8,7 +8,7 @@ import { BuilderC } from '../systems/building/BuildingSystem';
 import { ObjectPool } from '../core/ObjectPool';
 import type { SpatialHash } from '../core/SpatialHash';
 import {
-  Creature, PlayerControlled, StealthState, SurvivorC, Transform,
+  Creature, PlayerControlled, Spectator, StealthState, SurvivorC, Transform,
 } from '../components';
 import { itemDef } from '../data/items';
 import { killCreature } from '../systems/ai/Ecology';
@@ -112,7 +112,7 @@ export class CombatSystem implements System {
 
   update(world: World): void {
     const player = world.first(PlayerControlled, PlayerAnimC);
-    if (player !== undefined) {
+    if (player !== undefined && !world.has(player, Spectator)) { // spectators only watch
       const anim = world.require(player, PlayerAnimC);
       // In build mode the mouse buttons place/remove pieces instead.
       if (world.get(player, BuilderC)?.active) return void this.syncProjectiles();

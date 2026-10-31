@@ -232,8 +232,57 @@ export function propGeometry(kind: PropKind, variant: number): THREE.BufferGeome
         return merge([paint(new THREE.BoxGeometry(1.1, 0.35, 0.5).translate(0, 0.18, 0), 0x6e4a3a)]);
       case 'water_source':
         return merge([paint(new THREE.CircleGeometry(1, 6).rotateX(-Math.PI / 2), 0x3a7ca5)]);
+      case 'cactus':
+        return cactusGeometry(variant);
+      case 'dead_bush': {
+        // Grey, leafless twigs fanning out from the ground.
+        const parts: THREE.BufferGeometry[] = [];
+        const n = 6 + (variant % 3);
+        for (let k = 0; k < n; k++) {
+          const a = (k / n) * Math.PI * 2 + variant, out = 0.35 + pseudo(k + variant) * 0.35;
+          parts.push(branch(Math.cos(a) * out, 0, 0.45 + pseudo(k * 3 + variant) * 0.4, Math.sin(a) * out, 0.035, 0x8a7a66));
+        }
+        return merge(parts);
+      }
+      case 'tall_grass': {
+        // Waist-high clump: green on the prairie (variants 0–1), golden on the savanna (2–3).
+        const b = new CardBuilder();
+        tuftCards(b, 1.2, 1.35, 6, variant >= 2 ? 0xc2a957 : 0x7f9a3c, variant);
+        return b.build();
+      }
+      case 'reeds': {
+        const leaves = new CardBuilder();
+        tuftCards(leaves, 0.7, 1.9, 5, 0x4f7a3a, variant);
+        const heads: THREE.BufferGeometry[] = [];
+        for (let k = 0; k < 3; k++) {
+          const a = k * 2.1 + variant;
+          heads.push(paint(new THREE.CylinderGeometry(0.012, 0.012, 1.7, 4).translate(Math.cos(a) * 0.15, 0.85, Math.sin(a) * 0.15), 0x6b7a3e, 0.05));
+          heads.push(paint(new THREE.CylinderGeometry(0.045, 0.045, 0.28, 6).translate(Math.cos(a) * 0.15, 1.75, Math.sin(a) * 0.15), 0x5a3a22, 0.05)); // cattails
+        }
+        return withLeaves(heads, leaves);
+      }
     }
   });
+}
+
+/** A saguaro: ribbed column with one or two arms bending upward. */
+function cactusGeometry(variant: number): THREE.BufferGeometry {
+  const green = 0x557d3b;
+  const H = 2.6 + (variant % 2) * 0.9;
+  const parts: THREE.BufferGeometry[] = [
+    paint(new THREE.CylinderGeometry(0.2, 0.24, H, 10).translate(0, H / 2, 0), green, 0.08, variant),
+    paint(new THREE.SphereGeometry(0.2, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2).translate(0, H, 0), green, 0.08, variant),
+  ];
+  const arms = 1 + (variant % 3 === 0 ? 1 : 0) + (variant % 4 === 3 ? 1 : 0);
+  for (let k = 0; k < arms; k++) {
+    const a = k * 2.6 + variant, y = H * (0.35 + 0.15 * k), out = 0.55, up = 0.7 + pseudo(k + variant) * 0.5;
+    const dx = Math.cos(a), dz = Math.sin(a);
+    // Horizontal stub out of the column, then the arm turning up.
+    parts.push(paint(new THREE.CylinderGeometry(0.12, 0.12, out, 8).rotateZ(Math.PI / 2).rotateY(-a).translate(dx * out / 2, y, dz * out / 2), green, 0.08, k));
+    parts.push(paint(new THREE.CylinderGeometry(0.12, 0.13, up, 8).translate(dx * out, y + up / 2, dz * out), green, 0.08, k));
+    parts.push(paint(new THREE.SphereGeometry(0.12, 8, 5, 0, Math.PI * 2, 0, Math.PI / 2).translate(dx * out, y + up, dz * out), green, 0.08, k));
+  }
+  return merge(parts);
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +460,60 @@ function palm(shape: number, low: boolean): THREE.BufferGeometry {
   return withLeaves(parts, leaves);
 }
 
+/** Savanna acacia: a bare trunk forking into an umbrella-flat crown. */
+function acacia(shape: number, low: boolean): THREE.BufferGeometry {
+  const H = TREE_SPECIES[SPECIES.acacia]!.height, R = TREE_SPECIES[SPECIES.acacia]!.trunk;
+  const bark = 0x6e5a44;
+  const fork = H * 0.45;
+  const parts: THREE.BufferGeometry[] = [
+    paint(new THREE.CylinderGeometry(R * 0.7, R, fork, low ? 6 : 9).translate(0, fork / 2, 0), bark, 0.08, shape),
+  ];
+  const greens = [0x5d7a30, 0x6b8838, 0x52702b];
+  const leaves = new CardBuilder();
+  const n = low ? 3 : 5;
+  for (let k = 0; k < n; k++) {
+    const a = (k / n) * Math.PI * 2 + shape * 1.3;
+    const out = 1.8 + pseudo(k + shape) * 1.2;
+    const x = Math.cos(a) * out, z = Math.sin(a) * out, y = H * (0.85 + 0.08 * pseudo(k * 5 + shape));
+    parts.push(branch(x, fork - 0.2, y - 0.3, z, R * 0.5, bark));
+    parts.push(paint(wobble(new THREE.IcosahedronGeometry(1.6, low ? 0 : 1), 0.2, k + shape).scale(1.3, 0.28, 1.3).translate(x, y, z), 0x3f5a22, 0.06, k));
+    crownCards(leaves, V(x, y + 0.15, z), V(2.1, 0.45, 2.1), low ? 6 : 16, 1.3, LeafRegion.Broadleaf, greens, k + shape * 17);
+  }
+  crownCards(leaves, V(0, H * 0.92, 0), V(2.8, 0.5, 2.8), low ? 6 : 18, 1.3, LeafRegion.Broadleaf, greens, 51 + shape);
+  return withLeaves(parts, leaves);
+}
+
+/** Mangrove: a short trunk up on arching stilt roots, with a dense, glossy crown. */
+function mangrove(shape: number, low: boolean): THREE.BufferGeometry {
+  const H = TREE_SPECIES[SPECIES.mangrove]!.height, R = TREE_SPECIES[SPECIES.mangrove]!.trunk;
+  const bark = 0x5c4a3a;
+  const rootTop = 1.3;
+  const parts: THREE.BufferGeometry[] = [
+    paint(new THREE.CylinderGeometry(R * 0.6, R, H * 0.55, low ? 6 : 8).translate(0, rootTop + H * 0.27, 0), bark, 0.08, shape),
+  ];
+  const roots = low ? 4 : 8;
+  for (let k = 0; k < roots; k++) {
+    const a = (k / roots) * Math.PI * 2 + shape * 0.6;
+    const out = 1.3 + pseudo(k + shape) * 0.7;
+    // Two segments: out and down from the trunk, so each root arches into the mud.
+    const mx = Math.cos(a) * out * 0.55, mz = Math.sin(a) * out * 0.55;
+    parts.push(branch(mx, rootTop + 0.4, rootTop + 0.6, mz, 0.07, bark));
+    const g = branch(Math.cos(a) * out - mx, 0, -(rootTop + 1.1), Math.sin(a) * out - mz, 0.06, bark);
+    parts.push(g.translate(mx, rootTop + 0.6, mz));
+  }
+  const greens = [0x2f5a25, 0x3a6a2c, 0x2a4f22];
+  const leaves = new CardBuilder();
+  const n = low ? 3 : 6;
+  for (let k = 0; k < n; k++) {
+    const a = (k / n) * Math.PI * 2 + shape;
+    const c = V(Math.cos(a) * 1.5, H * 0.78 + (k % 2) * 0.5, Math.sin(a) * 1.5);
+    parts.push(core(1.2, c.x, c.y, c.z, greens[k % 3]!, k + shape * 5, low));
+    crownCards(leaves, c, V(1.8, 1.3, 1.8), low ? 7 : 20, 1.2, LeafRegion.Broadleaf, greens, k + shape * 5);
+  }
+  crownCards(leaves, V(0, H * 0.95, 0), V(2, 1.3, 2), low ? 6 : 16, 1.2, LeafRegion.Broadleaf, greens, 33 + shape);
+  return withLeaves(parts, leaves);
+}
+
 function treeGeometry(variant: number, low: boolean): THREE.BufferGeometry {
   const v = treeShape(variant);
   return cached(`tree:${v}:${low ? 'low' : 'high'}`, () => {
@@ -425,6 +528,8 @@ function treeGeometry(variant: number, low: boolean): THREE.BufferGeometry {
       case SPECIES.oak: return oak(shape, low);
       case SPECIES.birch: return birch(shape, low);
       case SPECIES.palm: return palm(shape, low);
+      case SPECIES.acacia: return acacia(shape, low);
+      case SPECIES.mangrove: return mangrove(shape, low);
       default: {
         const f = FIR_VARIANTS[shape % FIR_VARIANTS.length]!;
         return conifer({ H: S.height, trunk: S.trunk, bark: 0x5e4532, ...f }, shape, low);

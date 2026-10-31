@@ -23,9 +23,12 @@ export const TREE_SPECIES: readonly TreeSpecies[] = [
   { name: 'Birch', height: 13, trunk: 0.2, shapes: 2 },
   { name: 'Redwood', height: 26, trunk: 0.7, shapes: 2 },
   { name: 'Palm', height: 9, trunk: 0.2, shapes: 2 },
+  // Gen 4 biomes.
+  { name: 'Acacia', height: 8, trunk: 0.26, shapes: 2 },
+  { name: 'Mangrove', height: 7, trunk: 0.22, shapes: 2 },
 ];
 
-export const SPECIES = { fir: 0, spruce: 1, pine: 2, oak: 3, birch: 4, redwood: 5, palm: 6 } as const;
+export const SPECIES = { fir: 0, spruce: 1, pine: 2, oak: 3, birch: 4, redwood: 5, palm: 6, acacia: 7, mangrove: 8 } as const;
 
 export function treeSpecies(variant: number): number {
   return Math.min(TREE_SPECIES.length - 1, Math.floor(variant / 4));

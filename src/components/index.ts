@@ -1,4 +1,4 @@
-import { defineComponent } from '../core/ecs/World';
+import { defineComponent, type Entity, type World } from '../core/ecs/World';
 import type { CraftingStation } from '../data/recipes';
 import type { InventoryGridData, PlaceableKind, Resource, Survivor, ThermalExposure, Vec3 } from '../data/schema';
 
@@ -59,8 +59,27 @@ export interface PlayerControlled {
   grounded: boolean;
   /** Written by PhysicsSystem: the player is in water too deep to stand in. */
   swimming: boolean;
+  /** Spectator flight: vertical speed requested this tick (m/s). */
+  desiredLift?: number;
 }
 export const PlayerControlled = defineComponent<PlayerControlled>('PlayerControlled');
+
+/**
+ * Spectator mode (a launch option): the player flies through everything,
+ * fast, is invisible to animals, and doesn't get hungry or hurt.
+ */
+export interface Spectator {
+  /** Ground height under (x, z): flight never goes below it. */
+  ground: (x: number, z: number) => number;
+  /** Half the map size: flight stays inside it. */
+  half: number;
+}
+export const Spectator = defineComponent<Spectator>('Spectator');
+
+/** The player, unless they are a spectator (animals can't see, hear or bite one). */
+export function perceivablePlayer(world: World, player: Entity | undefined): Entity | undefined {
+  return player !== undefined && !world.has(player, Spectator) ? player : undefined;
+}
 
 export const ResourceC = defineComponent<Resource>('Resource');
 
@@ -228,6 +247,8 @@ export interface Blackboard {
   rngState: number;
   /** Seconds spent making no progress toward the current move target. */
   stuckTimer: number;
+  /** The current move target and the closest the creature has got to it (for stuckTimer). */
+  progress?: { x: number; z: number; closest: number };
   /** Crocodile / bear behaviour (ApexSystem), saved with the blackboard. */
   apex?: ApexState;
   /** Breeding (BreedingSystem), saved with the blackboard: sex, and pregnancy / rest timers in seconds. */

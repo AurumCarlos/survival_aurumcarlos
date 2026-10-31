@@ -30,6 +30,7 @@ const KINDS: readonly PropKind[] = [
   'tree', 'rock', 'berry_bush', 'fiber_plant', 'carcass', 'water_source', 'grass_tuft', 'log', 'mushroom',
   // appended (indices above must never change)
   'metal_rock', 'obsidian_rock', 'crystal', 'oil_rock', 'shell_bed', 'salt_deposit', 'rare_flower', 'fish_shoal',
+  'cactus', 'dead_bush', 'tall_grass', 'reeds', // gen 4
 ];
 const STRIDE = 8; // kind, x, y, z, rotationY, scale, variant, chunk
 

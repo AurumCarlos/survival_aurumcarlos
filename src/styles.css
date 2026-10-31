@@ -265,3 +265,9 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .compass-track .cl.major { color: var(--ink); font-size: 13px; }
 .compass-track i { position: absolute; top: 8px; width: 1px; height: 6px; background: rgba(255,255,255,.35); }
 .compass-mark { position: absolute; left: 50%; top: 0; width: 2px; height: 5px; margin-left: -1px; background: #f0d060; }
+
+/* Spectator mode: nothing to survive, so no vitals/hotbar/stealth; a reminder of the flight keys. */
+.spectator .vitals, .spectator .hotbar, .spectator .stealth { display: none; }
+.spectator-badge { position: absolute; left: 16px; bottom: 16px; padding: 6px 12px; border-radius: 6px; background: var(--panel);
+  font-size: 12px; color: var(--ink-dim); pointer-events: none; }
+.spectator-badge strong { color: var(--ink); margin-right: 8px; text-transform: uppercase; letter-spacing: .08em; }

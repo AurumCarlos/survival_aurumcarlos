@@ -1,7 +1,7 @@
 import type { Entity, System, World } from '../../core/ecs/World';
 import type { EventBus } from '../../core/EventBus';
 import {
-  AIBrain, Creature, PlayerControlled, SurvivorC, Transform, type ApexMode, type ApexState,
+  AIBrain, Creature, PlayerControlled, SurvivorC, Transform, perceivablePlayer, type ApexMode, type ApexState,
 } from '../../components';
 import { itemDef } from '../../data/items';
 import type { Vec3 } from '../../data/schema';
@@ -83,7 +83,7 @@ export class ApexSystem implements System {
   constructor(private readonly s: ApexServices) {}
 
   fixedUpdate(world: World, dt: number): void {
-    const player = world.first(PlayerControlled, SurvivorC, Transform);
+    const player = perceivablePlayer(world, world.first(PlayerControlled, SurvivorC, Transform));
     this.s.paths.beginTick();
     for (const e of world.query(AIBrain, Creature, Transform)) {
       const k = world.require(e, Creature);

@@ -1,6 +1,7 @@
 import { AssetLoader } from '../assets/AssetLoader';
 import { ASSET_MANIFEST } from '../assets/manifest';
 import { EventBus } from '../core/EventBus';
+import { setFrameLimit } from '../core/GameLoop';
 import { InputManager } from '../core/Input';
 import { Lifecycle } from '../core/Lifecycle';
 import { SaveStore, cleanName, newSlotId, type SlotInfo } from '../persistence/SaveStore';
@@ -153,6 +154,7 @@ export class App {
   private applySettings(): void {
     const c = this.settings.controls;
     this.renderer.setGraphics(this.settings.graphics);
+    setFrameLimit(this.settings.graphics.targetFps);
     this.renderer.setFov(c.fov);
     this.input.mouseSensitivity = BASE_MOUSE_SENSITIVITY * c.mouseSensitivity;
     this.input.invertY = c.invertY;

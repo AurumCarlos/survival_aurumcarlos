@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { System, World } from '../core/ecs/World';
-import { PlayerControlled } from '../components';
+import { PlayerControlled, Spectator } from '../components';
 import { PlayerAnimC, viewModelPose, type ViewPose } from '../systems/player/PlayerAnimation';
 import { viewModelGeometry } from './LowPolyFactory';
 import { createDetailMaterial } from './Materials';
@@ -63,8 +63,9 @@ export class ViewModel implements System {
 
   update(world: World): void {
     const player = world.first(PlayerControlled, PlayerAnimC);
-    if (player === undefined) {
+    if (player === undefined || world.has(player, Spectator)) { // spectators have no hands
       this.mesh.visible = false;
+      this.torchLight.intensity = 0;
       return;
     }
     const anim = world.require(player, PlayerAnimC);

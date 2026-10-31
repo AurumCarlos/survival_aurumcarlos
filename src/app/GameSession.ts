@@ -1,7 +1,8 @@
 import * as THREE from 'three';
+import * as CANNON from 'cannon-es';
 import type { AssetLoader } from '../assets/AssetLoader';
 import type { AudioWorldState, SoundEngine } from '../audio/SoundEngine';
-import { Creature, HeatSource, PlayerControlled, ResourceC, Structure, SurvivorC, Transform } from '../components';
+import { Creature, HeatSource, PlayerControlled, ResourceC, Spectator, Structure, SurvivorC, Transform } from '../components';
 import { World, type Entity } from '../core/ecs/World';
 import { EventBus } from '../core/EventBus';
 import { GameLoop } from '../core/GameLoop';
@@ -55,7 +56,7 @@ import { HUD } from '../ui/HUD';
 import { InventoryUI } from '../ui/InventoryUI';
 import type { MapConfig } from '../world/MapConfig';
 import type { TerrainBundle } from '../world/TerrainCodec';
-import { insideCave, sampleHeight, sampleSlope, type TerrainData } from '../world/TerrainGenerator';
+import { BIOME_NAME, insideCave, sampleHeight, sampleSlope, type TerrainData } from '../world/TerrainGenerator';
 import { populateResources, spawnApexPredators, spawnInitialCreatures, type PopulatedWorld } from '../world/WorldPopulator';
 
 const BABY_NAME: Record<string, string> = { deer: 'deer (fawn)', boar: 'boar (piglet)', wolf: 'wolf (pup)' };
@@ -99,6 +100,7 @@ export class GameSession {
   private readonly interaction: InteractionSystem;
   private readonly crafting: CraftingSystem;
   private disposed = false;
+  private spectatorBadge: HTMLElement | null = null;
   private fireTime = 0;
   readonly buildings: BuildingGrid;
   private readonly building: BuildingSystem;
@@ -164,6 +166,14 @@ export class GameSession {
     const feet = world.require(this.player, Transform).position;
     const body = this.physics.createPlayerBody(feet);
     world.add(this.player, PhysicsBody, { body, originOffsetY: PLAYER_SHAPE.height / 2 + 0.05 });
+    if (d.map.spectator) {
+      // Spectator: a kinematic body that passes through everything (PhysicsSystem.fly).
+      body.type = CANNON.Body.KINEMATIC;
+      body.mass = 0;
+      body.updateMassProperties();
+      body.collisionResponse = false;
+      world.add(this.player, Spectator, { ground: (x, z) => sampleHeight(terrain, x, z), half: terrain.cfg.size / 2 });
+    }
 
     // ---- Systems ------------------------------------------------------------
     this.paths = new FlowFieldService(this.populated.nav);
@@ -204,7 +214,7 @@ export class GameSession {
       const b = world.get(this.player, BuilderC);
       return !!b?.active || this.building.lookingAt !== null;
     });
-    this.interaction.blocked = () => this.structures.focused !== null;
+    this.interaction.blocked = () => this.structures.focused !== null || !!d.map.spectator;
     this.interaction.wheelBlocked = () => !!world.get(this.player, BuilderC)?.active;
     events.on('structure:open', ({ entity }) => (this.openRequest = entity));
     // Respawn: remember the bed you last used; on death, leave your things where you fell.
@@ -229,6 +239,8 @@ export class GameSession {
       },
       // Mountain air: −0.4 °C per metre above the lowlands (snowy peaks freeze at night).
       { baseY: terrain.cfg.waterLevel + 6, lapseCPerM: 0.4 },
+      // Gen 4 biomes: deserts are hot, the tundra is cold.
+      terrain.biomes ? (x, z) => BIOME_CLIMATE_C[terrain.biomes![biomeIndex(terrain, x, z)]!] ?? 0 : null,
     );
     this.loop = new GameLoop(world, { onRender: this.onRender });
     const noise = new NoiseBus();
@@ -303,6 +315,13 @@ export class GameSession {
     new SleepSystem(world, events, this.cycle, [this.stations, environment, this.interaction, this.crafting, survival]);
 
     this.hud = new HUD(d.uiContainer, events, this.cycle, survival.manager, () => d.renderer.resolutionScale);
+    if (d.map.spectator) {
+      d.uiContainer.classList.add('spectator');
+      this.spectatorBadge = document.createElement('div');
+      this.spectatorBadge.className = 'spectator-badge';
+      this.spectatorBadge.innerHTML = '<strong>Spectator</strong> ZQSD/WASD fly · Space up · C down · Shift fast';
+      d.uiContainer.appendChild(this.spectatorBadge);
+    }
     this.hookSounds();
     this.inventory = new InventoryUI(
       d.uiContainer, world, () => this.player, this.crafting, survival.manager, events, (kind) => this.placeStructure(kind),
@@ -420,6 +439,8 @@ export class GameSession {
     this.structurePhysics?.dispose();
     this.hud.dispose();
     this.inventory.dispose();
+    this.spectatorBadge?.remove();
+    this.d.uiContainer.classList.remove('spectator');
     this.d.renderer.resetScene();
     this.events.clear();
   }
@@ -432,11 +453,34 @@ export class GameSession {
     this.animateFires(dt);
     if (this.d.sound && !this.loop.isPaused) this.d.sound.update(dt, this.audioState(dt));
     this.inventory.frame();
+    if (!this.loop.isPaused) this.announceBiome(dt);
     const prompt = this.building.prompt() ?? this.structures.prompt(this.world) ?? this.hud.promptFor(this.world, this.interaction.focused, this.player);
     this.hud.update(this.world, this.player, dt, this.loop, prompt, this.crafting.progress(this.player));
     this.d.renderer.render();
     this.d.input.endFrame();
   };
+
+  private biome = { current: -1, candidate: -1, held: 0 };
+
+  /** "Savanna", "Tundra"…: a short message when the player walks into another biome (after 1.5 s in it). */
+  private announceBiome(dt: number): void {
+    const t = this.d.bundle.terrain;
+    if (!t.biomes) return;
+    const p = this.world.require(this.player, Transform).position;
+    const b = t.biomes[biomeIndex(t, p.x, p.z)]!;
+    const s = this.biome;
+    if (b === s.current) return void (s.candidate = -1);
+    if (b !== s.candidate) {
+      s.candidate = b;
+      s.held = 0;
+      return;
+    }
+    s.held += dt;
+    if (s.held < 1.5) return;
+    const first = s.current === -1;
+    s.current = b;
+    if (!first && b !== 6) this.events.emit('ui:toast', { text: BIOME_NAME[b] ?? 'Unknown land' }); // caves have their own feel
+  }
 
   /**
    * Put a structure down ~2 m in front of the player, on whatever is there:
@@ -524,7 +568,7 @@ export class GameSession {
     let kind: AudioWorldState['ground'] = 'grass';
     if (onFloor) kind = 'wood';
     else if (inCave || sampleSlope(terrain, feet.x, feet.z) > 0.3 || ground > W + 18) kind = 'rock';
-    else if (ground < W + 1.2 || (terrain.biomes && terrain.biomes[biomeIndex(terrain, feet.x, feet.z)] === 0)) kind = 'sand';
+    else if (ground < W + 1.2 || (terrain.biomes && [0, 10].includes(terrain.biomes[biomeIndex(terrain, feet.x, feet.z)]!))) kind = 'sand'; // beach, desert
     const body = this.world.get(this.player, PhysicsBody)?.body;
     return {
       waterDistance: this.waterDistance,
@@ -555,6 +599,9 @@ export class GameSession {
     }
   }
 }
+
+/** °C added to the air in each biome (by BIOME id): mangrove, rainforest, savanna, desert, prairie, tundra, lake. */
+const BIOME_CLIMATE_C: Readonly<Record<number, number>> = { 7: 1, 8: 1.5, 9: 3, 10: 7, 11: 0, 12: -12, 13: -0.5 };
 
 /** Index of the height/biome vertex nearest (x, z). */
 function biomeIndex(t: TerrainData, x: number, z: number): number {

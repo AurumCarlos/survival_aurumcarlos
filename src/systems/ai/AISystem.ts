@@ -3,7 +3,7 @@ import type { Entity, System, World } from '../../core/ecs/World';
 import type { EventBus } from '../../core/EventBus';
 import type { SpatialHash } from '../../core/SpatialHash';
 import {
-  AIBrain, Creature, HeatSource, PlayerControlled, ResourceC, SurvivorC, Transform, type AIState, type Blackboard,
+  AIBrain, Creature, HeatSource, PlayerControlled, ResourceC, SurvivorC, Transform, perceivablePlayer, type AIState, type Blackboard,
 } from '../../components';
 import type { Vec3 } from '../../data/schema';
 import type { DayNightCycle } from '../DayNightCycle';
@@ -245,7 +245,9 @@ const patrol = new Action<AIServices>('patrol', (c) => {
     return 'running';
   }
   const wp = bb.waypoints[bb.waypointIndex % bb.waypoints.length]!;
-  if (Math.hypot(wp.x - p.x, wp.z - p.z) < 1 || bb.stuckTimer > STUCK_GIVE_UP) {
+  const d = Math.hypot(wp.x - p.x, wp.z - p.z);
+  // A waypoint inside a trunk or rock can't be reached: close enough counts.
+  if (d < 1 || bb.stuckTimer > STUCK_GIVE_UP || (d < 2.5 && !c.services.paths.isWalkable(wp.x, wp.z))) {
     bb.stuckTimer = 0;
     bb.waypointIndex = (bb.waypointIndex + 1) % bb.waypoints.length;
     bb.idleTimer = 1 + rand(bb) * 3;
@@ -489,7 +491,7 @@ export class AISystem implements System {
       } else if (k.species === 'wolf' && k.temperament === 'predator') this.wolves.push(e);
     }
     const services: AIServices = {
-      ...this.services, player: world.first(PlayerControlled, SurvivorC, Transform),
+      ...this.services, player: perceivablePlayer(world, world.first(PlayerControlled, SurvivorC, Transform)),
       deer: this.deer, prey: this.prey, piglets: this.piglets, wolves: this.wolves,
     };
     services.paths.beginTick();
@@ -591,9 +593,21 @@ function steer(c: Ctx, tx: number, tz: number, speed: number): BTStatus {
   } else if (paths.isWalkable(p.x, nz)) {
     p.z = nz;
   }
-  // Progress tracking lets patrol/hunt give up on unreachable points.
-  const progressed = before - Math.hypot(tx - p.x, tz - p.z);
-  c.bb.stuckTimer = progressed > s * c.dt * 0.1 ? 0 : c.bb.stuckTimer + c.dt;
+  // Progress tracking lets patrol/hunt/graze give up on unreachable points.
+  // It must be real progress (getting a quarter metre closer than ever
+  // before), not jitter: circling a goal that sits inside a trunk makes tiny
+  // gains every other tick and would otherwise spin forever.
+  const now = Math.hypot(tx - p.x, tz - p.z);
+  const g = c.bb.progress;
+  if (!g || Math.hypot(g.x - tx, g.z - tz) > 0.5) {
+    c.bb.progress = { x: tx, z: tz, closest: before };
+    c.bb.stuckTimer = 0;
+  } else if (now < g.closest - 0.25) {
+    g.closest = now;
+    c.bb.stuckTimer = 0;
+  } else {
+    c.bb.stuckTimer += c.dt;
+  }
   return 'running';
 }
 

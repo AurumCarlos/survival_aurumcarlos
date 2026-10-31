@@ -1,5 +1,5 @@
 import type { Entity, System, World } from '../core/ecs/World';
-import { PlayerControlled, SurvivorC, Transform } from '../components';
+import { PlayerControlled, Spectator, SurvivorC, Transform } from '../components';
 import { MOVEMENT } from '../systems/PlayerControlSystem';
 import { PLAYER_SHAPE, PhysicsBody, type PhysicsWorld } from './PhysicsWorld';
 
@@ -57,6 +57,11 @@ export class PhysicsSystem implements System {
     for (const e of world.query(PlayerControlled, PhysicsBody, SurvivorC)) {
       const pc = world.require(e, PlayerControlled);
       const { body } = world.require(e, PhysicsBody);
+      const spec = world.get(e, Spectator);
+      if (spec) {
+        this.fly(body, pc, spec, dt);
+        continue;
+      }
       const feet0 = body.position.y - PLAYER_SHAPE.height / 2;
       const onStairs = this.stairsAt(body.position.x, body.position.z, feet0) !== null;
       pc.grounded = onStairs || this.physics.isGrounded(body);
@@ -123,7 +128,7 @@ export class PhysicsSystem implements System {
     // Stairs: keep the player's feet on the flight (up or down) unless jumping.
     for (const e of world.query(PlayerControlled, PhysicsBody)) {
       const { body } = world.require(e, PhysicsBody);
-      if (body.velocity.y > 2.5) continue;
+      if (body.velocity.y > 2.5 || world.has(e, Spectator)) continue;
       const feet = body.position.y - PLAYER_SHAPE.height / 2;
       const h = this.stairsAt(body.position.x, body.position.z, feet);
       if (h === null || feet > h + 0.45 || feet < h - 0.9) continue;
@@ -149,5 +154,23 @@ export class PhysicsSystem implements System {
         s.stats.distanceTravelled += Math.hypot(dx, dz);
       }
     }
+  }
+
+  /**
+   * Spectator flight: the body is kinematic with no collision response (set
+   * up by GameSession), so it simply moves at the requested velocity —
+   * through trees, walls and rock — but never below the ground or off the map.
+   */
+  private fly(body: PhysicsBody['body'], pc: PlayerControlled, spec: Spectator, dt: number): void {
+    pc.grounded = false;
+    pc.swimming = false;
+    const vx = pc.desiredVelocity.x, vz = pc.desiredVelocity.z;
+    let vy = pc.desiredLift ?? 0;
+    const lim = spec.half - 2;
+    const nx = Math.max(-lim, Math.min(lim, body.position.x + vx * dt));
+    const nz = Math.max(-lim, Math.min(lim, body.position.z + vz * dt));
+    const minY = spec.ground(nx, nz) + PLAYER_SHAPE.height / 2 + 0.1;
+    if (body.position.y + vy * dt < minY) vy = (minY - body.position.y) / dt;
+    body.velocity.set((nx - body.position.x) / dt, vy, (nz - body.position.z) / dt);
   }
 }

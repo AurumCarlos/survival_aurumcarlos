@@ -17,7 +17,7 @@ import { DayNightCycle, DEFAULT_DAY_NIGHT } from '../src/systems/DayNightCycle';
 import { EnvironmentSystem } from '../src/systems/EnvironmentSystem';
 import { SurvivalStatusManager } from '../src/systems/SurvivalStatusManager';
 import { parseMapConfig, toTerrainConfig } from '../src/world/MapConfig';
-import { BIOME, GENERATOR_VERSION, coastProfiles, generateTerrain, insideCave, sampleHeight, sampleSlope, ISLAND, type TerrainData } from '../src/world/TerrainGenerator';
+import { BIOME, GENERATOR_VERSION, coastProfiles, generateTerrain, insideCave, islandBiomes, sampleHeight, sampleSlope, ISLAND, type TerrainData } from '../src/world/TerrainGenerator';
 import { populateResources, spawnApexPredators } from '../src/world/WorldPopulator';
 import { Structure } from '../src/components';
 import { BuildingGrid } from '../src/systems/building/BuildingGrid';
@@ -129,7 +129,7 @@ async function main(): Promise<void> {
 
   console.log('\n── Varied coastline (generator v3) ──');
   {
-    check('new worlds use generator v3', GENERATOR_VERSION === 3);
+    check('generator v3 still available (new worlds use v4)', GENERATOR_VERSION >= 3);
     for (const seed of [777, 42, 2024]) {
       const cfg = toTerrainConfig(parseMapConfig({ size: 256, seed, gen: 3 }));
       const ps = coastProfiles(cfg);
@@ -204,7 +204,7 @@ async function main(): Promise<void> {
     const nav = new NavGrid(bundle.nav);
     const events = new EventBus();
     const crocs = spawnApexPredators(world, bundle, map, []).filter((e) => world.require(e, Creature).species === 'crocodile');
-    check('2 crocodiles on a 256 m island, in the water', crocs.length === 2 && crocs.every((e) => sampleHeight(t, world.require(e, Transform).position.x, world.require(e, Transform).position.z) < t.cfg.waterLevel - 0.5));
+    check('5 crocodiles on a 256 m island, in the water', crocs.length === 5 && crocs.every((e) => sampleHeight(t, world.require(e, Transform).position.x, world.require(e, Transform).position.z) < t.cfg.waterLevel - 0.5));
     const croc = crocs[0]!;
     const cp = world.require(croc, Transform).position;
     const apex = new ApexSystem({
@@ -393,6 +393,32 @@ async function main(): Promise<void> {
     st.fixedUpdate(world, 0.1);
     world.flush();
     check('the empty bag disappears', !world.get(bag!, Structure));
+  }
+
+  console.log('\n── Gen 4 biomes ──');
+  {
+    const all = new Set<number>();
+    let fewOk = true, signatureOk = true;
+    const SIGNATURE: Record<string, number> = { tropical: BIOME.rainforest, arid: BIOME.desert, cold: BIOME.tundra };
+    for (let seed = 1; seed <= 30; seed++) {
+      const { climate, special } = islandBiomes(toTerrainConfig(parseMapConfig({ size: 256, seed, gen: 4 })));
+      special.forEach((b) => all.add(b));
+      if (special.length < 2 || special.length > 3) fewOk = false;
+      if (!climate || special[0] !== SIGNATURE[climate]) signatureOk = false;
+    }
+    check('each island gets a few special biomes, never all of them', fewOk);
+    check('…always including its climate’s signature biome (rainforest, desert or tundra)', signatureOk);
+    check('every new biome shows up somewhere', [BIOME.mangrove, BIOME.rainforest, BIOME.savanna, BIOME.desert, BIOME.prairie, BIOME.tundra, BIOME.lake].every((b) => all.has(b)),
+      [...all].sort((a, b) => a - b).join(','));
+    const t = generateTerrain(toTerrainConfig(parseMapConfig({ size: 256, seed: 777, gen: 4 })));
+    const desert = t.biomes!.filter((b) => b === BIOME.desert).length;
+    check('an arid island has a desert with cacti in it', desert > 500 && t.props.some((p) => p.kind === 'cactus'));
+    const t24 = generateTerrain(toTerrainConfig(parseMapConfig({ size: 256, seed: 24, gen: 4 })));
+    const mangroves = t24.props.filter((p) => p.kind === 'tree' && Math.floor(p.variant / 4) === 8);
+    check('a mangrove coast has mangrove trees, some standing in the shallows', mangroves.length > 50 && mangroves.some((p) => p.position.y < t24.cfg.waterLevel));
+    const t42 = generateTerrain(toTerrainConfig(parseMapConfig({ size: 256, seed: 42, gen: 4 })));
+    check('a lake has fish and reeds in it', t42.biomes!.includes(BIOME.lake) && t42.props.some((p) => p.kind === 'reeds') &&
+      t42.props.filter((p) => p.kind === 'fish_shoal').length > 30);
   }
 
   console.log('\n── Animals breed like real ones; babies grow up ──');

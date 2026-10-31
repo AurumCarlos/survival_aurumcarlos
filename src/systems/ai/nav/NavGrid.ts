@@ -40,6 +40,7 @@ export function obstacleRadius(p: PropPlacement): number {
   if (p.kind === 'tree') return treeTrunkRadius(p.variant) * p.scale;
   if (p.kind === 'rock' && p.scale > 1) return 0.6 * p.scale;
   if (SOLID_NODES.has(p.kind)) return 0.55 * p.scale;
+  if (p.kind === 'cactus') return 0.28 * p.scale;
   return 0;
 }
 

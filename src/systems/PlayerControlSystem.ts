@@ -1,6 +1,6 @@
 import type { System, World } from '../core/ecs/World';
 import type { InputManager } from '../core/Input';
-import { PlayerControlled, SurvivorC } from '../components';
+import { PlayerControlled, Spectator, SurvivorC } from '../components';
 
 export const MOVEMENT = {
   walkSpeed: 4.2,
@@ -9,6 +9,9 @@ export const MOVEMENT = {
   swimSpeed: 2.4,
   jumpVelocity: 5.5,
   maxPitch: Math.PI / 2 - 0.05,
+  /** Spectator flight (m/s): normal, and with Shift held. */
+  flySpeed: 12,
+  flyFastSpeed: 40,
 } as const;
 
 /**
@@ -39,6 +42,20 @@ export class PlayerControlSystem implements System {
       pc.pitch = Math.max(-MOVEMENT.maxPitch, Math.min(MOVEMENT.maxPitch, pc.pitch + this.look.pitch));
 
       this.input.moveAxis(this.axis);
+      if (world.has(e, Spectator)) {
+        // Fly where you look; Space up, C down, Shift much faster.
+        s.activity = 'idle';
+        const speed = this.input.isDown('sprint') ? MOVEMENT.flyFastSpeed : MOVEMENT.flySpeed;
+        const len = Math.hypot(this.axis.x, this.axis.y) || 1;
+        const ix = this.axis.x / len, iz = this.axis.y / len;
+        const sin = Math.sin(pc.yaw), cos = Math.cos(pc.yaw), cp = Math.cos(pc.pitch);
+        pc.desiredVelocity.x = (ix * cos - iz * sin * cp) * speed;
+        pc.desiredVelocity.z = (-ix * sin - iz * cos * cp) * speed;
+        const vertical = (this.input.isDown('jump') ? 1 : 0) - (this.input.isDown('crouch') ? 1 : 0);
+        pc.desiredLift = (iz * Math.sin(pc.pitch) + vertical) * speed;
+        pc.wantsJump = false;
+        continue;
+      }
       const moving = this.axis.x !== 0 || this.axis.y !== 0;
       const crouch = this.input.isDown('crouch');
       const swim = pc.swimming;

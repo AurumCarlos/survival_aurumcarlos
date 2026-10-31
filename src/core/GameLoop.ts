@@ -10,11 +10,83 @@ export interface FrameScheduler {
   cancel(handle: number): void;
 }
 
-export const browserScheduler: FrameScheduler = {
-  now: () => performance.now(),
-  request: (cb) => requestAnimationFrame(cb),
-  cancel: (h) => cancelAnimationFrame(h),
-};
+/** Frame-rate limit (FPS) for browserScheduler; 0 = unlimited. Set from the graphics settings. */
+let frameLimit = 60;
+export function setFrameLimit(fps: number): void {
+  frameLimit = Math.max(0, fps);
+}
+
+/**
+ * The browser frame scheduler, with a frame-rate limit.
+ *
+ * requestAnimationFrame runs at the screen's refresh rate (usually 60 Hz),
+ * so on its own it caps the game there whatever the setting says. Up to 60
+ * FPS frames stay on rAF (vsync: smoothest), skipping some for a 30 limit.
+ * Above 60, or unlimited, frames are paced with timers instead — like
+ * turning VSync off in a desktop game. On a 60 Hz screen the extra frames
+ * are rendered (lower input latency) but the screen still shows 60 a second.
+ * A hidden tab always falls back to rAF, which the browser throttles.
+ */
+class PacedScheduler implements FrameScheduler {
+  private nextId = 1;
+  private last = 0;
+  private readonly live = new Map<number, { raf?: number; timer?: ReturnType<typeof setTimeout> }>();
+  private channel: MessageChannel | null = null;
+  /** Callbacks waiting for the next MessageChannel task (several loops can share this scheduler). */
+  private readonly queued: Array<() => void> = [];
+
+  now(): number {
+    return performance.now();
+  }
+
+  request(cb: (timeMs: number) => void): number {
+    const id = this.nextId++;
+    const entry: { raf?: number; timer?: ReturnType<typeof setTimeout> } = {};
+    this.live.set(id, entry);
+    const fire = (t: number): void => {
+      if (!this.live.delete(id)) return; // cancelled
+      this.last = t;
+      cb(t);
+    };
+    const hidden = typeof document !== 'undefined' && document.hidden;
+    if (hidden || (frameLimit > 0 && frameLimit <= 60)) {
+      const onFrame = (t: number): void => {
+        if (!this.live.has(id)) return;
+        // Below the refresh rate (a 30 limit): skip frames that come too early.
+        if (!hidden && frameLimit < 55 && t - this.last < 1000 / frameLimit - 2) {
+          entry.raf = requestAnimationFrame(onFrame);
+          return;
+        }
+        fire(t);
+      };
+      entry.raf = requestAnimationFrame(onFrame);
+      return id;
+    }
+    const wait = frameLimit > 0 ? this.last + 1000 / frameLimit - performance.now() : 0;
+    if (wait > 1) {
+      entry.timer = setTimeout(() => fire(performance.now()), wait);
+    } else {
+      // A MessageChannel task has no 4 ms timer clamp (needed above ~200 FPS).
+      if (!this.channel) {
+        this.channel = new MessageChannel();
+        this.channel.port1.onmessage = () => this.queued.shift()?.();
+      }
+      this.queued.push(() => fire(performance.now()));
+      this.channel.port2.postMessage(0);
+    }
+    return id;
+  }
+
+  cancel(handle: number): void {
+    const e = this.live.get(handle);
+    if (!e) return;
+    if (e.raf !== undefined) cancelAnimationFrame(e.raf);
+    if (e.timer !== undefined) clearTimeout(e.timer);
+    this.live.delete(handle);
+  }
+}
+
+export const browserScheduler: FrameScheduler = new PacedScheduler();
 
 export type PauseReason = 'user' | 'hidden' | 'blur' | 'context-lost' | 'loading' | 'dead';
 

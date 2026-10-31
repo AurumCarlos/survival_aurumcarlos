@@ -182,7 +182,7 @@ export class Renderer implements ViewportTarget {
     this.fpsFrames = 0;
     this.fpsWindowStart = now;
     if (elapsed > 2000 || this.ladder.length < 2) return; // first window / back from a pause, or nothing to adjust
-    const target = this.graphics.targetFps;
+    const target = this.graphics.targetFps || 120; // unlimited: aim high, without wrecking the image
     let next = this.rung;
     if (fps < target * 0.93) {
       next += fps < target / 2 ? 2 : 1; // big drops take big steps

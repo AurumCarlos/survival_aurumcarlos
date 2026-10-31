@@ -80,7 +80,7 @@ export function spawnInitialCreatures(world: World, bundle: TerrainBundle, map: 
 }
 
 /**
- * Crocodiles in the lagoon around the island (1 per 128 m of map edge) and
+ * Crocodiles in the lagoon around the island (1 per 50 m of map edge, at least 3) and
  * a bear asleep in every cave. `existing` lists apex creatures already in the
  * world (a loaded save): only what's missing is added, so loading a save made
  * before they existed brings them in, and loading a newer one changes nothing.
@@ -90,7 +90,7 @@ export function spawnApexPredators(world: World, bundle: TerrainBundle, map: Map
   const W = terrain.cfg.waterLevel;
   const rand = mulberry32(map.seed + 4242);
   const out: Entity[] = [];
-  const wantCrocs = Math.max(1, Math.round(map.size / 128));
+  const wantCrocs = Math.max(3, Math.round(map.size / 50)); // 128 m: 3 · 256 m: 5 · 512 m: 10
   const haveCrocs = existing.filter((s) => s === 'crocodile').length;
   const sp = terrain.spawn;
   for (let n = haveCrocs, tries = 0; n < wantCrocs && tries < 200; tries++) {

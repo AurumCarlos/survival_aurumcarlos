@@ -18,7 +18,7 @@ import { SurvivalStatusManager } from '../src/systems/SurvivalStatusManager';
 import { parseMapConfig, toTerrainConfig } from '../src/world/MapConfig';
 import { mulberry32 } from '../src/world/Noise';
 import { buildNavGrid } from '../src/systems/ai/nav/NavGrid';
-import { generateTerrain, sampleHeight } from '../src/world/TerrainGenerator';
+import { GENERATOR_VERSION, generateTerrain, sampleHeight } from '../src/world/TerrainGenerator';
 import { populateResources, spawnInitialCreatures } from '../src/world/WorldPopulator';
 
 declare const process: { argv: string[] };
@@ -30,7 +30,7 @@ export interface EcoRun {
 }
 
 export function runEcology(days: number, size: number, seed: number, dt: number, log = false): EcoRun {
-  const map = parseMapConfig({ size, seed });
+  const map = parseMapConfig({ size, seed, gen: GENERATOR_VERSION });
   const terrain = generateTerrain(toTerrainConfig(map));
   const bundle = { terrain, nav: buildNavGrid(terrain) };
   const world = new World();

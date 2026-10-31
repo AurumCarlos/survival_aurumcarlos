@@ -3,7 +3,11 @@
  * speed on/near buildings, step-up onto foundations, beds and sleeping,
  * animal counts. Uses the real cannon-es physics.
  */
-import { AIBrain, Creature, PlayerControlled, SurvivorC, Transform } from '../src/components';
+import * as CANNON from 'cannon-es';
+import { AIBrain, Creature, Exposure, PlayerControlled, Spectator, SurvivorC, Transform } from '../src/components';
+import { MOVEMENT } from '../src/systems/PlayerControlSystem';
+import { AISystem } from '../src/systems/ai/AISystem';
+import { straightLinePaths } from '../src/systems/ai/nav/FlowFieldService';
 import { World } from '../src/core/ecs/World';
 import { EventBus } from '../src/core/EventBus';
 import { GameLoop, type FrameScheduler } from '../src/core/GameLoop';
@@ -285,6 +289,69 @@ async function main(): Promise<void> {
     console.log(`   256 m map: ${b.wolf} wolves, ${b.deer} deer, ${b.boar} boars (was 4 / 7 / 3)`);
     check('about twice as many animals', b.wolf + b.deer + b.boar >= 28);
     void generateTerrain; void toTerrainConfig;
+  }
+
+  console.log('\n── Spectator mode ──');
+  {
+    const { world, physics, player, t } = setup();
+    await physics.addStaticProps(t);
+    const { body } = world.require(player, PhysicsBody);
+    body.type = CANNON.Body.KINEMATIC;
+    body.mass = 0;
+    body.updateMassProperties();
+    body.collisionResponse = false;
+    world.add(player, Spectator, { ground: () => 1, half: t.cfg.size / 2 });
+    const fly = (vx: number, lift: number, vz: number, seconds: number): void => {
+      const loop = new GameLoop(world, { scheduler: manual() });
+      loop.addSystem({ name: 'intent', fixedUpdate: () => {
+        const pc = world.require(player, PlayerControlled);
+        pc.desiredVelocity.x = vx;
+        pc.desiredVelocity.z = vz;
+        pc.desiredLift = lift;
+      } });
+      loop.addSystem(new PhysicsSystem(physics, -5));
+      for (let ms = 0; ms <= seconds * 1000; ms += 1000 / 60) loop.tick(ms);
+    };
+    fly(0, MOVEMENT.flySpeed, 0, 1);
+    const up = world.require(player, Transform).position.y;
+    check('spectators fly up (no gravity)', up > 10, `y ${up.toFixed(1)}`);
+    fly(0, 0, 0, 1);
+    check('…and hover when idle', Math.abs(world.require(player, Transform).position.y - up) < 0.05);
+    fly(0, -MOVEMENT.flyFastSpeed, 0, 2);
+    check('never below the ground', world.require(player, Transform).position.y >= 1, `y ${world.require(player, Transform).position.y.toFixed(2)}`);
+    fly(8, 0, 0, 1);
+    check('fly through the tree trunk at x = 5 (no collisions)', world.require(player, Transform).position.x > 7, `x ${world.require(player, Transform).position.x.toFixed(1)}`);
+    fly(MOVEMENT.flyFastSpeed, 0, 0, 3);
+    check('fast flight, but never off the map', world.require(player, Transform).position.x <= t.cfg.size / 2 - 2 + 1e-6 && world.require(player, Transform).position.x > 25);
+
+    // Animals: a wolf that "sees" the spectator next to it never chases or bites.
+    const events = new EventBus();
+    const cycle = new DayNightCycle(DEFAULT_DAY_NIGHT);
+    const survival = new SurvivalSystem(events);
+    const ai = new AISystem({ groundHeight: () => 1, paths: straightLinePaths, cycle, survival: survival.manager, events });
+    const pp = world.require(player, Transform).position;
+    pp.y = 1;
+    const wolf = spawnCreature(world, 'wolf', { x: pp.x - 1, y: 1, z: pp.z }, 7, 3);
+    const k = world.require(wolf, Creature);
+    let bites = 0;
+    events.on('player:damaged', () => bites++);
+    for (let i = 0; i < 240; i++) {
+      k.perception.canSeeTarget = true;
+      k.perception.awareness = 1.5;
+      k.perception.lastKnownTargetPos = { ...pp };
+      k.perception.lastKnownAge = 0;
+      ai.fixedUpdate(world, 1 / 60);
+    }
+    const st = world.require(wolf, AIBrain).blackboard.state;
+    check('animals ignore a spectator (a wolf right next to you never chases or bites)', bites === 0 && st !== 'chase' && st !== 'attack', `state ${st}, ${bites} bites`);
+
+    const s = world.require(player, SurvivorC);
+    world.add(player, Exposure, { ambientC: 22, fireWarmthC: 0, shelterInsulation: 0, clothingInsulationC: 0, wet: false, feltC: 22 } as never);
+    const hunger = s.vitals.hunger;
+    for (let i = 0; i < 600; i++) survival.fixedUpdate(world, 1);
+    check('no hunger, no harm for a spectator', s.vitals.hunger === hunger && s.alive);
+    check('spectator mode is kept in the map config (and so in saves)',
+      parseMapConfig({ size: 256, seed: 1, spectator: true }).spectator === true && parseMapConfig({ size: 256, seed: 1 }).spectator === undefined);
   }
 
   console.log(`\n${failures === 0 ? 'All checks passed.' : `${failures} check(s) FAILED.`}`);

@@ -21,6 +21,8 @@ export class EnvironmentSystem implements System {
     private readonly shelterAt?: (feet: { x: number; y: number; z: number }) => { insulation: number; roof: boolean },
     /** Air gets colder with height: −lapse °C per metre above baseY (mountains). */
     private readonly altitude: { baseY: number; lapseCPerM: number } | null = null,
+    /** Local climate: °C added to the air at (x, z) (a hot desert, a cold tundra). */
+    private readonly climateAt: ((x: number, z: number) => number) | null = null,
   ) {}
 
   /** Air temperature at a given height (°C). */
@@ -87,7 +89,7 @@ export class EnvironmentSystem implements System {
         roofed ||= built.roof;
       }
 
-      exp.ambientC = this.altitude ? this.ambientAt(p.y) : ambient;
+      exp.ambientC = (this.altitude ? this.ambientAt(p.y) : ambient) + (this.climateAt?.(p.x, p.z) ?? 0);
       exp.fireWarmthC = Math.min(warmth, this.maxFireWarmthC);
       exp.shelterInsulation = insulation;
       // Swimming soaks you regardless of shelter; rain only if unroofed.

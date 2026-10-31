@@ -1,6 +1,6 @@
 import type { Entity, System, World } from '../../core/ecs/World';
 import type { EventBus } from '../../core/EventBus';
-import { AIBrain, Creature, HeatSource, PlayerControlled, StealthState, SurvivorC, Transform } from '../../components';
+import { AIBrain, Creature, HeatSource, PlayerControlled, StealthState, SurvivorC, Transform, perceivablePlayer } from '../../components';
 import type { Activity, Vec3 } from '../../data/schema';
 import type { DayNightCycle } from '../DayNightCycle';
 import type { NoiseBus } from './NoiseBus';
@@ -58,7 +58,7 @@ export class PerceptionSystem implements System {
   ) {}
 
   fixedUpdate(world: World, dt: number): void {
-    const player = world.first(PlayerControlled, SurvivorC, Transform);
+    const player = perceivablePlayer(world, world.first(PlayerControlled, SurvivorC, Transform));
     if (player === undefined) {
       this.noise.clear();
       return;

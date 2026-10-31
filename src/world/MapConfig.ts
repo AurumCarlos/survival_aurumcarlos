@@ -13,6 +13,8 @@ export interface MapConfig {
   gen?: number;
   /** Test mode: the survivor starts with the best gear and stacks of every resource. */
   testMode?: boolean;
+  /** Spectator mode: fly freely and fast; animals never notice you; no hunger, no harm. */
+  spectator?: boolean;
 }
 
 export const MAP_LIMITS = { minSize: 128, maxSize: 512, step: 32 } as const;
@@ -32,7 +34,7 @@ export class MapConfigError extends Error {}
  * size so every chunk is complete; non-numeric input is an error rather than
  * a silent default, so the form can show it.
  */
-export function parseMapConfig(raw: { seed?: unknown; size?: unknown; gen?: unknown; testMode?: unknown }): MapConfig {
+export function parseMapConfig(raw: { seed?: unknown; size?: unknown; gen?: unknown; testMode?: unknown; spectator?: unknown }): MapConfig {
   const size = Number(raw.size);
   if (!Number.isFinite(size)) throw new MapConfigError('Map size must be a number.');
   const snapped = Math.round(size / MAP_LIMITS.step) * MAP_LIMITS.step;
@@ -52,6 +54,7 @@ export function parseMapConfig(raw: { seed?: unknown; size?: unknown; gen?: unkn
     seed, size: clamped,
     ...(Number.isInteger(gen) && gen >= 2 && gen <= GENERATOR_VERSION ? { gen } : {}),
     ...(raw.testMode === true ? { testMode: true } : {}),
+    ...(raw.spectator === true ? { spectator: true } : {}),
   };
 }
 

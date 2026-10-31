@@ -61,7 +61,7 @@ export class MainMenu {
   private state: AppState = 'menu';
   private model: MenuModel;
   /** Config form values survive Back → New Game. */
-  private form = { size: 256, seed: '', name: '', testMode: false };
+  private form = { size: 256, seed: '', name: '', testMode: false, spectator: false };
   /** Main menu sub-view: the title screen or the list of saved worlds. */
   private view: 'main' | 'saves' = 'main';
   private confirmDelete: string | null = null;
@@ -152,6 +152,10 @@ export class MainMenu {
             <label class="row check">
               <input name="testmode" type="checkbox" ${this.form.testMode ? 'checked' : ''}>
               <span>Test mode<small>Start with the best weapons, tools and armor, every station and stacks of every resource</small></span>
+            </label>
+            <label class="row check">
+              <input name="spectator" type="checkbox" ${this.form.spectator ? 'checked' : ''}>
+              <span>Spectator mode<small>Fly fast through the island (Space up, C down, Shift faster); animals don't notice you; no hunger, no harm</small></span>
             </label>
             <p class="error" data-k="error"></p>
             <div class="actions">
@@ -353,6 +357,8 @@ export class MainMenu {
       this.form.seed = t.value;
     } else if (t.name === 'testmode') {
       this.form.testMode = t.checked;
+    } else if (t.name === 'spectator') {
+      this.form.spectator = t.checked;
     } else if (t.name === 'wname') {
       this.form.name = t.value;
     } else if (t.name === 'importfile' && t.files?.[0]) {
@@ -366,10 +372,10 @@ export class MainMenu {
     try {
       const raw = this.root.querySelector<HTMLInputElement>('input[name=size]')?.value ?? '';
       if (raw.trim() === '') throw new MapConfigError('Enter a map size.');
-      const cfg = parseMapConfig({ size: raw, seed: this.form.seed.trim(), gen: GENERATOR_VERSION, testMode: this.form.testMode });
+      const cfg = parseMapConfig({ size: raw, seed: this.form.seed.trim(), gen: GENERATOR_VERSION, testMode: this.form.testMode, spectator: this.form.spectator });
       if (cfg.size !== Number(raw)) this.toast(`Map size adjusted to ${cfg.size} m (multiples of ${MAP_LIMITS.step}, ${MAP_LIMITS.minSize}–${MAP_LIMITS.maxSize}).`);
       this.form.size = cfg.size;
-      this.h.onStart(cfg, this.form.name.trim() || `${cfg.testMode ? 'Test ' : ''}Island ${cfg.seed}`);
+      this.h.onStart(cfg, this.form.name.trim() || `${cfg.spectator ? 'Spectator ' : cfg.testMode ? 'Test ' : ''}Island ${cfg.seed}`);
     } catch (e) {
       if (err) err.textContent = e instanceof Error ? e.message : String(e);
     }

@@ -19,7 +19,7 @@ import { firLowGeometry, flatMaterial, propGeometry } from './LowPolyFactory';
  */
 
 /** Too small to see from afar: only drawn near the player. */
-const SMALL: ReadonlySet<PropKind> = new Set<PropKind>(['grass_tuft', 'fiber_plant', 'mushroom', 'rare_flower', 'shell_bed', 'salt_deposit', 'fish_shoal']);
+const SMALL: ReadonlySet<PropKind> = new Set<PropKind>(['grass_tuft', 'fiber_plant', 'mushroom', 'rare_flower', 'shell_bed', 'salt_deposit', 'fish_shoal', 'tall_grass', 'reeds', 'dead_bush']);
 
 interface Parts { solid: number; leaf: number }
 interface Variant { high: Parts; low: Parts | null }
@@ -72,7 +72,7 @@ function split(g: THREE.BufferGeometry, kind: PropKind): { solid: THREE.BufferGe
     const [a, b] = g.groups as [THREE.GeometryGroup, THREE.GeometryGroup];
     return { solid: extract(g, a.start, a.count, SOLID_ATTRS), leaf: extract(g, b.start, b.count, LEAF_ATTRS) };
   }
-  if (kind === 'grass_tuft' || kind === 'fiber_plant') return { solid: null, leaf: extract(g, 0, total, LEAF_ATTRS) };
+  if (kind === 'grass_tuft' || kind === 'fiber_plant' || kind === 'tall_grass') return { solid: null, leaf: extract(g, 0, total, LEAF_ATTRS) };
   return { solid: extract(g, 0, total, SOLID_ATTRS), leaf: null };
 }
 

@@ -37,6 +37,7 @@ export interface GraphicsSettings {
   detailedTrees: number;
   /** Percent of the normal distance props (trees, rocks…) are drawn to. */
   viewDistance: number;
+  /** Frame-rate limit, and what Auto quality aims for; 0 = unlimited. */
   targetFps: number;
   showFps: boolean;
 }
@@ -59,9 +60,12 @@ export const GRAPHICS_DEFS: readonly SettingDef[] = [
     ] },
   },
   {
-    key: 'targetFps', label: 'Target frame rate', group: 'Display', default: 60,
-    help: 'What Auto quality aims for.',
-    kind: { type: 'select', options: [{ value: '30', label: '30 FPS' }, { value: '60', label: '60 FPS' }, { value: '120', label: '120 FPS' }, { value: '144', label: '144 FPS' }] },
+    key: 'targetFps', label: 'Frame rate limit', group: 'Display', default: 60,
+    help: 'Also what Auto quality aims for. Above your screen\'s refresh rate (usually 60 Hz) extra frames are rendered (a little less input lag) but the screen can\'t show them.',
+    kind: { type: 'select', options: [
+      { value: '30', label: '30 FPS' }, { value: '60', label: '60 FPS' }, { value: '120', label: '120 FPS' },
+      { value: '144', label: '144 FPS' }, { value: '240', label: '240 FPS' }, { value: '0', label: 'Unlimited' },
+    ] },
   },
   {
     key: 'detailedTrees', label: 'Detailed trees', group: 'World detail', default: 15,

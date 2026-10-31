@@ -16,6 +16,11 @@ Controls use physical key positions (`KeyboardEvent.code`), so **WASD lands on Z
 Shift sprint · C crouch · Space jump · hold E harvest · I/Tab inventory · 1–6 or mouse wheel hotbar ·
 LMB swing · RMB throw spear · B build mode (R/wheel piece, LMB place, X demolish) · E door · Esc or P pause.
 
+**Spectator mode** (New world → Spectator mode): fly freely through everything (ZQSD/WASD where you
+look, Space up, C down, Shift for 40 m/s instead of 12), never below the ground or off the map.
+Animals can't see, hear or attack you, and you don't get hungry or hurt, so you can watch the food chain
+up close. The vitals and hotbar are hidden and harvesting/combat are off. The mode is saved with the world.
+
 **Settings** (main menu or pause menu): graphics (quality, resolution, target FPS, number of detailed trees,
 draw distance, FPS counter) and controls & sound (mouse sensitivity, invert Y, field of view, volumes).
 Definitions live in `src/data/settings.ts`; values are saved in the browser and apply immediately.
@@ -432,6 +437,30 @@ cost 300 ms per step; compound bodies cost 0.5 ms.
   quarter of the rate instead of freezing, so animals eat, hunt and wander everywhere.
 - Unclaimed carcasses rot away after 25 minutes. A toast tells you when wolves bring down an animal nearby.
 - The simulation tab of the settings page is gone: every value above is fixed and tuned.
+
+## 13. Biomes, frame-rate limit, crocodiles, spinning animals
+
+- **New biomes (generator v4; older worlds regenerate unchanged).** Each island has a climate and gets
+  a few special biomes from it (2 on a small map, up to 4 on a huge one), never all of them:
+  - *tropical*: rainforest (always), plus some of mangrove, savanna, lake, tall-grass prairie;
+  - *arid*: desert (always), plus some of savanna, lake (an oasis with palms), prairie;
+  - *cold*: tundra (always), plus lake and/or prairie.
+  - Rainforest: a closed canopy of giant trees, ferns and mushrooms. Mangrove: a stretch of coast
+    turned into a muddy tidal flat with channels, and mangrove trees on stilt roots standing in the
+    shallows. Lake: one big inland lake with reeds, fish shoals and drinkable water. Savanna: dry golden
+    grass and flat-topped acacias. Desert: sand dunes, cacti (solid), dead bushes, no berries. Prairie:
+    waist-high grass, a few trees, flowers. Tundra: flat, cold ground with snow patches, rocks and
+    stunted conifers.
+  - Deserts are 7 °C hotter and the tundra 12 °C colder; a message names the biome you walk into.
+  - Regions are domain-warped Voronoi cells (`IslandShape.planBiomes`, `regionAt`), classic
+    forest/jungle/meadow regions stay, and mountains keep their highlands and snow.
+- **Frame-rate limit** (Settings → Graphics): 30/60/120/144/240/Unlimited. `requestAnimationFrame` is tied
+  to the screen's refresh rate, so above 60 the loop is paced with timers (`PacedScheduler` in
+  `core/GameLoop.ts`), like turning VSync off. On a 60 Hz screen the extra frames are rendered but not shown.
+- **Crocodiles:** 1 per 50 m of map edge, at least 3 (5 on a medium map instead of 2).
+- **Animals spinning on the spot (fixed):** a patrol waypoint inside a trunk made the animal circle it
+  forever; the stuck detector was reset by tiny gains. Unreachable waypoints now count as reached when
+  close, and "stuck" means not getting a quarter metre closer than ever before.
 
 ## Verification
 

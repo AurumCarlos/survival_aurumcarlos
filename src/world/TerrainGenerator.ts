@@ -38,17 +38,40 @@ export interface TerrainConfig {
   /**
    * Generator version. 1 = the flat desert island (kept so older saves
    * regenerate exactly the same world); 2 = mountains, caves and biomes;
-   * 3 = a varied coastline (flat beaches, dunes, cliffs and coves).
+   * 3 = a varied coastline (flat beaches, dunes, cliffs and coves);
+   * 4 = special biomes (mangrove, rainforest, lake, savanna, desert,
+   * tall-grass prairie, tundra), a few per island.
    */
   gen?: number;
 }
 
 /** Newest generator; new worlds use it. */
-export const GENERATOR_VERSION = 3;
+export const GENERATOR_VERSION = 4;
 
-export const BIOME = { beach: 0, forest: 1, jungle: 2, meadow: 3, highland: 4, snow: 5, cave: 6 } as const;
+export const BIOME = {
+  beach: 0, forest: 1, jungle: 2, meadow: 3, highland: 4, snow: 5, cave: 6,
+  // Gen 4
+  mangrove: 7, rainforest: 8, savanna: 9, desert: 10, prairie: 11, tundra: 12, lake: 13,
+} as const;
 export type Biome = (typeof BIOME)[keyof typeof BIOME];
-export const BIOME_NAME = ['Beach', 'Forest', 'Jungle', 'Meadow', 'Highlands', 'Snowy peak', 'Cave'] as const;
+export const BIOME_NAME = [
+  'Beach', 'Forest', 'Jungle', 'Meadow', 'Highlands', 'Snowy peak', 'Cave',
+  'Mangrove', 'Rainforest', 'Savanna', 'Desert', 'Tall-grass prairie', 'Tundra', 'Lake',
+] as const;
+
+/**
+ * Gen 4: each island has a climate, and from that climate's pool it gets a
+ * few special biomes (2 on a small map, up to 4 on a huge one) — never all
+ * of them. Regional biomes take over parts of the lowlands; a lake is one
+ * big inland lake with fish; a mangrove is a stretch of muddy coast.
+ */
+type Climate = 'tropical' | 'arid' | 'cold';
+const CLIMATE_POOL: Readonly<Record<Climate, readonly Biome[]>> = {
+  tropical: [BIOME.rainforest, BIOME.mangrove, BIOME.savanna, BIOME.lake, BIOME.prairie],
+  arid: [BIOME.desert, BIOME.savanna, BIOME.lake, BIOME.prairie],
+  cold: [BIOME.tundra, BIOME.lake, BIOME.prairie],
+};
+const REGIONAL: ReadonlySet<Biome> = new Set<Biome>([BIOME.rainforest, BIOME.savanna, BIOME.desert, BIOME.prairie, BIOME.tundra]);
 
 /**
  * A cave dug into a mountainside: a flat-floored chamber (carved into the
@@ -151,9 +174,11 @@ export interface CoastProfile {
   dune: number;
   /** Cliff top height above the sea (m). */
   cliffH: number;
+  /** 0..1 how much of a mangrove this stretch of coast is (gen 4). */
+  mangrove?: number;
 }
 
-export type PropKind = ResourceKind | 'grass_tuft' | 'log';
+export type PropKind = ResourceKind | 'grass_tuft' | 'log' | 'cactus' | 'dead_bush' | 'tall_grass' | 'reeds';
 
 export interface PropPlacement {
   kind: PropKind;
@@ -211,6 +236,16 @@ class IslandShape {
   private readonly coastKind: Perlin;
   /** Coves (gen 3): centre angle, angular half-width, depth (m). */
   readonly coves: Array<{ a: number; aw: number; depth: number }> = [];
+  /** Gen 4: the special biomes this island has. */
+  readonly special: Biome[] = [];
+  climate: Climate | null = null;
+  /** Gen 4: region centres; a null biome is a "classic" region (forest/jungle/meadow by moisture). */
+  readonly regions: Array<{ x: number; z: number; biome: Biome | null }> = [];
+  /** Gen 4: the big lake, if this island has one (placed after the mountains). */
+  lake: { x: number; z: number; r: number } | null = null;
+  /** Gen 4: the mangrove coast, if any: centre angle and angular half-width. */
+  mangroveArc: { a: number; aw: number } | null = null;
+  private regionWarp: Perlin | null = null;
 
   constructor(readonly cfg: TerrainConfig) {
     this.half = cfg.size / 2;
@@ -226,6 +261,93 @@ class IslandShape {
       this.calibrateCoast();
       this.placeCoves();
     }
+    if (this.gen >= 4) this.planBiomes();
+  }
+
+  /**
+   * Gen 4: picks the climate and this island's special biomes, the region
+   * centres and the mangrove coast. Own RNG: the rest of the island is
+   * unaffected.
+   */
+  private planBiomes(): void {
+    const rand = mulberry32(this.cfg.seed + 8080);
+    const climates: Climate[] = ['tropical', 'arid', 'cold'];
+    const climate = climates[Math.floor(rand() * climates.length)]!;
+    this.climate = climate;
+    // The climate's signature biome (first in its pool) always comes; the rest are drawn.
+    const [signature, ...pool] = CLIMATE_POOL[climate];
+    for (let i = pool.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      [pool[i], pool[j]] = [pool[j]!, pool[i]!];
+    }
+    const count = this.cfg.size <= 192 ? 2 : this.cfg.size <= 384 ? 3 : 4;
+    this.special.push(signature!, ...pool.slice(0, Math.min(count - 1, pool.length)));
+    this.regionWarp = new Perlin(this.cfg.seed + 8181);
+
+    // Regions: one per regional biome, plus classic ones so forests remain.
+    const kinds: Array<Biome | null> = this.special.filter((b) => REGIONAL.has(b));
+    const classic = this.cfg.size <= 192 ? 1 : 2;
+    for (let i = 0; i < classic; i++) kinds.push(null);
+    const maxR = this.radius * 0.72, minGap = this.radius * 0.55;
+    for (const biome of kinds) {
+      let best: { x: number; z: number } | null = null, bestGap = -1;
+      for (let tries = 0; tries < 40; tries++) {
+        const a = rand() * Math.PI * 2, r = Math.sqrt(rand()) * maxR;
+        const p = { x: Math.cos(a) * r, z: Math.sin(a) * r };
+        const gap = this.regions.reduce((g, q) => Math.min(g, Math.hypot(q.x - p.x, q.z - p.z)), Infinity);
+        if (gap > bestGap) { bestGap = gap; best = p; }
+        if (gap >= minGap) break;
+      }
+      this.regions.push({ ...best!, biome });
+    }
+
+    if (this.special.includes(BIOME.mangrove)) {
+      // On the flattest stretch of shore, away from the coves.
+      let bestA = 0, bestScore = Infinity;
+      for (let k = 0; k < 72; k++) {
+        const a = (k / 72) * Math.PI * 2;
+        if (this.coves.some((cv) => Math.abs(angleDiff(cv.a, a)) < cv.aw + 0.6)) continue;
+        const score = this.cliffNoise(Math.cos(a), Math.sin(a)) + rand() * 0.1;
+        if (score < bestScore) { bestScore = score; bestA = a; }
+      }
+      this.mangroveArc = { a: bestA, aw: 0.5 + rand() * 0.25 };
+    }
+  }
+
+  /** Gen 4: special regional biome at (x, z), or null for a classic region. Borders wiggle (domain warp). */
+  regionAt(x: number, z: number): Biome | null {
+    if (!this.regionWarp || this.regions.length === 0) return null;
+    const wx = x + this.regionWarp.fbm(x / 45, z / 45, 2) * 22;
+    const wz = z + this.regionWarp.fbm(x / 45 + 50, z / 45 - 30, 2) * 22;
+    let best: Biome | null = null, bd = Infinity;
+    for (const r of this.regions) {
+      const d = (wx - r.x) ** 2 + (wz - r.z) ** 2;
+      if (d < bd) { bd = d; best = r.biome; }
+    }
+    return best;
+  }
+
+  /** Gen 4: 0..1, how deep inside a region of `biome` (x, z) is — 0 at its border, 1 from 14 m in. */
+  regionWeight(x: number, z: number, biome: Biome): number {
+    if (!this.regionWarp || !this.regions.some((r) => r.biome === biome)) return 0;
+    const wx = x + this.regionWarp.fbm(x / 45, z / 45, 2) * 22;
+    const wz = z + this.regionWarp.fbm(x / 45 + 50, z / 45 - 30, 2) * 22;
+    let mine = Infinity, other = Infinity;
+    for (const r of this.regions) {
+      const d = Math.hypot(wx - r.x, wz - r.z);
+      if (r.biome === biome) mine = Math.min(mine, d);
+      else other = Math.min(other, d);
+    }
+    // Distance to the bisector between the two nearest centres ≈ (other − mine) / 2.
+    return smoothstep(0, 14, (other - mine) / 2);
+  }
+
+  /** Gen 4: 0..1 mangrove factor for a direction around the island. */
+  mangroveAt(angle: number): number {
+    const m = this.mangroveArc;
+    if (!m) return 0;
+    const t = angleDiff(angle, m.a) / m.aw;
+    return Math.abs(t) >= 1 ? 0 : smoothstep(0, 0.45, 1 - Math.abs(t));
   }
 
   /** Noise thresholds for cliffs and dunes, calibrated per island (see COAST). */
@@ -310,16 +432,35 @@ class IslandShape {
   biomeAt(x: number, z: number, h: number): Biome {
     const W = this.cfg.waterLevel;
     for (const c of this.caves) if (insideCave(c, x, z, 0.5)) return BIOME.cave;
-    const { d, beach } = this.zone(x, z);
+    const { d, beach, mangrove = 0 } = this.zone(x, z);
+    if (mangrove > 0.5 && d < beach + 6 && d > -16) return BIOME.mangrove;
     if (d < beach) return BIOME.beach;
     if (this.gen < 2) return BIOME.forest;
+    if (this.lake && Math.hypot(x - this.lake.x, z - this.lake.z) < this.lake.r + 7) return BIOME.lake;
     const top = this.peaks.reduce((a, p) => Math.max(a, p.h), 0);
     if (top > 0 && h > W + 3 + top * 0.66) return BIOME.snow;
     if (h > W + 11) return BIOME.highland;
+    const region = this.regionAt(x, z);
+    if (region !== null) return region;
     const m = this.moisture(x, z);
     if (m > 0.62) return BIOME.jungle;
     if (m < 0.33) return BIOME.meadow;
     return BIOME.forest;
+  }
+
+  /** Gen 4 relief: sand dunes in deserts, flat open tundra. */
+  private regionRelief(x: number, z: number, h: number, inland: number): number {
+    const W = this.cfg.waterLevel;
+    const wd = this.regionWeight(x, z, BIOME.desert);
+    if (wd > 0) {
+      const n = this.coastKind.fbm(x / 26, z / 26, 2);
+      const ridge = 0.5 + 0.5 * Math.sin((x * 0.8 + z * 0.45) / 5.5 + n * 5);
+      const dunes = W + 1 + inland * (1.2 + 2.8 * ridge * ridge * (0.7 + 0.6 * (n + 0.5)));
+      h = lerp(h, dunes, wd);
+    }
+    const wt = this.regionWeight(x, z, BIOME.tundra);
+    if (wt > 0) h = lerp(h, W + 0.9 + (h - W - 0.9) * 0.45, wt);
+    return h;
   }
 
   /** Coastline radius, beach width and coast type for a direction. Sampled on a circle so it is seamless. */
@@ -348,7 +489,13 @@ class IslandShape {
     beach *= 1 - 0.4 * cove;
     beach = lerp(beach, 1.2, cliff);
     const cliffH = lerp(COAST.cliffMin, COAST.cliffMax, clamp(this.coastKind.noise2(c * 3 + 70, s * 3) + 0.5, 0, 1));
-    return { coast, beach, cliff, dune, cliffH };
+    if (this.gen < 4) return { coast, beach, cliff, dune, cliffH };
+    // Mangrove: a wide, muddy tidal flat instead of cliffs, dunes or sand.
+    const mangrove = this.mangroveAt(angle);
+    cliff *= 1 - mangrove;
+    dune *= 1 - mangrove;
+    beach *= 1 + 0.6 * mangrove;
+    return { coast, beach, cliff, dune, cliffH, mangrove };
   }
 
   /** Metres inland from the waterline (negative = out at sea), the local beach width and coast type. */
@@ -359,13 +506,14 @@ class IslandShape {
 
   height(x: number, z: number): number {
     const W = this.cfg.waterLevel;
-    const { d, beach, cliff, dune, cliffH } = this.zone(x, z);
+    const { d, beach, cliff, dune, cliffH, mangrove = 0 } = this.zone(x, z);
     let h: number;
     if (d < 0) {
       // Sea: a gentle lagoon shelf, then the floor drops to seaDepth. At the
       // foot of a cliff there is hardly any shelf: deep water right away.
+      // Off a mangrove the shallows go on much further (the trees stand in them).
       const s = -d;
-      const lagoon = lerp(ISLAND.lagoon, 1.5, cliff), top = W + 0.25 - cliff * 0.9, drop = lerp(0.3, 0.9, cliff);
+      const lagoon = lerp(lerp(ISLAND.lagoon, 1.5, cliff), 18, mangrove), top = W + 0.25 - cliff * 0.9 - mangrove * 0.2, drop = lerp(0.3, 0.9, cliff);
       h = s <= lagoon
         ? top - s * 0.07
         : top - lagoon * 0.07 - (s - lagoon) * drop;
@@ -381,6 +529,12 @@ class IslandShape {
         const ridge = 0.5 + 0.5 * Math.sin(d * 0.55 + n * 4);
         h += dune * bell * COAST.duneHeight * (0.25 + 0.75 * ridge * ridge) * (0.75 + 0.5 * (n + 0.5));
       }
+      if (mangrove > 0) {
+        // Tidal mud flat, criss-crossed by channels just under the water.
+        const ch = Math.abs(this.coastKind.fbm(x / 11 + 60, z / 11 - 60, 2));
+        const mud = W - 0.1 + 0.55 * t + (ch < 0.1 ? -0.35 : 0.05) + this.hills.noise2(x / 5, z / 5) * 0.08;
+        h = lerp(h, mud, mangrove);
+      }
     } else {
       // Forest: low, broad hills that fade in from the beach edge.
       const f = this.cfg.baseFrequency;
@@ -388,6 +542,7 @@ class IslandShape {
       const hills = (this.hills.fbm(x * f, z * f, 5) + 1) * 0.5;
       const outcrop = Math.max(0, this.hills.ridged(x * f * 2.6 + 40, z * f * 2.6 - 17, 3) - 0.58) * 3;
       h = W + 0.7 + inland * (0.6 + hills * this.cfg.maxHeight + outcrop);
+      if (this.gen >= 4) h = this.regionRelief(x, z, h, inland);
       if (this.gen >= 2) h += this.mountain(x, z) * this.inlandFade(d, beach);
     }
     if (cliff > 0 && d > -1) {
@@ -413,6 +568,16 @@ class IslandShape {
         h = lerp(lerp(c.y, h, out), h, side);
       }
     }
+    // Gen 4 lake: a big, deeper pond (fish live in it).
+    if (this.lake) {
+      const L = this.lake, dist = Math.hypot(x - L.x, z - L.z), bank = 10;
+      if (dist < L.r + bank) {
+        const lakeH = dist < L.r
+          ? W - 0.2 - 2.4 * (1 - (dist / L.r) ** 2) + this.hills.noise2(x / 6, z / 6) * 0.15
+          : lerp(W + 0.2, h, smoothstep(L.r, L.r + bank, dist));
+        h = Math.min(h, lakeH);
+      }
+    }
     // Freshwater ponds sit in hollows in the forest.
     for (const p of this.ponds) {
       const dist = Math.hypot(x - p.x, z - p.z);
@@ -436,7 +601,7 @@ export function generateTerrain(cfg: TerrainConfig = DEFAULT_TERRAIN): TerrainDa
   // Gen 3: wash up on a flat beach, not at the foot of a cliff or on a dune.
   const badSpawn = (a: number): boolean => {
     const p = island.coastAt(a);
-    return p.cliff > 0.1 || p.dune > 0.2;
+    return p.cliff > 0.1 || p.dune > 0.2 || (p.mangrove ?? 0) > 0.05;
   };
   for (let tries = 0; island.gen >= 3 && tries < 48 && badSpawn(spawnAngle); tries++) spawnAngle += 0.31;
   const sc = island.coastAt(spawnAngle);
@@ -444,6 +609,7 @@ export function generateTerrain(cfg: TerrainConfig = DEFAULT_TERRAIN): TerrainDa
   const sx = Math.cos(spawnAngle) * sr, sz = Math.sin(spawnAngle) * sr;
 
   if (island.gen >= 2) placeMountainsAndCaves(island, rand);
+  if (island.gen >= 4 && island.special.includes(BIOME.lake)) placeLake(island, sx, sz);
 
   const pondCount = cfg.size <= 192 ? 1 : cfg.size <= 384 ? 2 : 3;
   const pondR = clamp(cfg.size * 0.025, 5, 10);
@@ -454,6 +620,7 @@ export function generateTerrain(cfg: TerrainConfig = DEFAULT_TERRAIN): TerrainDa
     if (island.ponds.some((q) => Math.hypot(q.x - p.x, q.z - p.z) < q.r + p.r + 25)) continue;
     // Ponds lie in the lowlands, not halfway up a mountain or in a cave.
     if (island.gen >= 2 && (island.mountain(p.x, p.z) > 1.5 || island.caves.some((c) => Math.hypot(c.x - p.x, c.z - p.z) < c.length + p.r + 8))) continue;
+    if (island.lake && Math.hypot(island.lake.x - p.x, island.lake.z - p.z) < island.lake.r + p.r + 20) continue;
     island.ponds.push(p);
   }
 
@@ -547,6 +714,33 @@ function placeMountainsAndCaves(island: IslandShape, _rand: () => number): void 
   }
 }
 
+/**
+ * Gen 4: the big lake, inland in the lowlands (off the mountains and caves,
+ * away from where the player washes up). Own RNG.
+ */
+function placeLake(island: IslandShape, sx: number, sz: number): void {
+  const cfg = island.cfg;
+  const rand = mulberry32(cfg.seed + 9191);
+  const r = clamp(cfg.size * 0.06, 12, 28);
+  const maxD = Math.max(4, island.radius * (1 - ISLAND.wobble) - island.beach - r - 16);
+  for (let tries = 0; tries < 300; tries++) {
+    const a = rand() * Math.PI * 2, d = Math.sqrt(rand()) * maxD;
+    const x = Math.cos(a) * d, z = Math.sin(a) * d;
+    if (Math.hypot(x - sx, z - sz) < r + 25) continue;
+    if (island.peaks.some((p) => Math.hypot(p.x - x, p.z - z) < p.r * 0.85 + r)) continue;
+    if (island.caves.some((c) => Math.hypot(c.x - x, c.z - z) < c.length + r + 10)) continue;
+    island.lake = { x, z, r: r * (0.85 + rand() * 0.3) };
+    return;
+  }
+  island.special.splice(island.special.indexOf(BIOME.lake), 1); // no room for it on this island
+}
+
+/** Gen 4: the island's climate and planned special biomes (tests, debug; a lake with no room is dropped later). */
+export function islandBiomes(cfg: TerrainConfig): { climate: string | null; special: Biome[] } {
+  const island = new IslandShape(cfg);
+  return { climate: island.climate, special: [...island.special] };
+}
+
 /** The coast profile at `samples` evenly spaced angles around the island (tests, tuning). */
 export function coastProfiles(cfg: TerrainConfig, samples = 360): CoastProfile[] {
   const island = new IslandShape(cfg);
@@ -628,9 +822,16 @@ function scatterProps(t: TerrainData, island: IslandShape, rand: () => number): 
       const keep = hash2(cx * 3 + 1, cz * 7 - 2, cfg.seed + 55);
       if (biome === BIOME.highland && keep > 0.42) continue;
       if (biome === BIOME.meadow && keep > 0.16) continue;
+      // Gen 4: open savanna and prairie, bare desert, a few stunted trees on the tundra.
+      if (biome === BIOME.desert || biome === BIOME.mangrove) continue;
+      if (biome === BIOME.savanna && keep > 0.07) continue;
+      if (biome === BIOME.prairie && keep > 0.04) continue;
+      if (biome === BIOME.tundra && keep > 0.16) continue;
+      if (biome === BIOME.lake && keep > 0.45) continue;
       if (island.gen >= 2 && island.caves.some((c) => caveClearZone(c, x, z))) continue;
       const edge = clamp(depth / 10, 0.15, 1);
-      const clearing = (noise.fbm(x / 28, z / 28, 2) + 1) / 2 < 0.27;
+      // The rainforest has no clearings: a closed canopy.
+      const clearing = biome !== BIOME.rainforest && (noise.fbm(x / 28, z / 28, 2) + 1) / 2 < 0.27;
       if (rand() > edge * (clearing ? 0.1 : 0.93)) continue;
       // 1 in 5 is a young tree, so the canopy has layers instead of one flat height.
       const young = rand() < 0.2;
@@ -642,6 +843,8 @@ function scatterProps(t: TerrainData, island: IslandShape, rand: () => number): 
       const sp = biomeSpecies(biome, pickSpecies(groves, x, z, depth, cfg.seed), keep);
       last.variant = sp * 4 + (last.variant % 4);
       last.scale *= SPECIES_SCALE[sp]!;
+      if (biome === BIOME.tundra) last.scale *= 0.55; // stunted by the cold
+      if (biome === BIOME.rainforest) last.scale *= 1.15; // giants
       trees.set(key(cx, cz), { x, z });
     }
   }
@@ -708,6 +911,8 @@ function scatterProps(t: TerrainData, island: IslandShape, rand: () => number): 
 
   // ---- 4. ARK resources, palms, flowers (appended: older prop indices stay valid) ----
   scatterExtras(t, island, out, nearTrunk, noise);
+  // ---- 5. Gen 4 biome plants (appended too) ----
+  if (island.gen >= 4) scatterBiomeDecor(t, island, out, nearTrunk);
   return out;
 }
 
@@ -718,7 +923,7 @@ function scatterProps(t: TerrainData, island: IslandShape, rand: () => number): 
  */
 export const TREE_HEIGHT_STRETCH = 1.25;
 /** Per-species size spread on top of the base scale. */
-const SPECIES_SCALE = [1, 1, 1, 1.1, 0.95, 1.05, 1];
+const SPECIES_SCALE = [1, 1, 1, 1.1, 0.95, 1.05, 1, 1, 1];
 
 /** Undergrowth per biome: cumulative thresholds for rock, berry bush, fiber, grass, log, mushroom. */
 const UNDERGROWTH: Partial<Record<Biome, readonly number[]>> = {
@@ -727,6 +932,14 @@ const UNDERGROWTH: Partial<Record<Biome, readonly number[]>> = {
   [BIOME.meadow]: [0.02, 0.1, 0.2, 0.7, 0.705, 0.71],
   [BIOME.highland]: [0.1, 0.12, 0.16, 0.36, 0.37, 0.37],
   [BIOME.snow]: [0.05, 0.05, 0.05, 0.06, 0.06, 0.06],
+  // Gen 4 (their special plants — cacti, tall grass, reeds… — come from scatterBiomeDecor).
+  [BIOME.rainforest]: [0.02, 0.1, 0.26, 0.56, 0.6, 0.68],
+  [BIOME.savanna]: [0.03, 0.045, 0.1, 0.32, 0.325, 0.325],
+  [BIOME.desert]: [0.03, 0.03, 0.035, 0.04, 0.045, 0.045],
+  [BIOME.prairie]: [0.01, 0.07, 0.15, 0.3, 0.3, 0.3],
+  [BIOME.tundra]: [0.1, 0.11, 0.13, 0.32, 0.33, 0.33],
+  [BIOME.mangrove]: [0.01, 0.02, 0.1, 0.2, 0.24, 0.26],
+  [BIOME.lake]: [0.03, 0.09, 0.2, 0.5, 0.51, 0.53],
 };
 
 /** Biomes bias the species mix (gen 2); `roll` is a 0..1 hash. */
@@ -738,6 +951,14 @@ function biomeSpecies(biome: Biome, picked: number, roll: number): number {
       const k = (roll * 997) % 1;
       return k < 0.4 ? SPECIES.oak : k < 0.62 ? SPECIES.palm : k < 0.75 ? SPECIES.redwood : picked;
     }
+    case BIOME.rainforest: {
+      const k = (roll * 997) % 1;
+      return k < 0.35 ? SPECIES.oak : k < 0.65 ? SPECIES.palm : k < 0.85 ? SPECIES.redwood : SPECIES.birch;
+    }
+    case BIOME.savanna: return roll < 0.065 ? SPECIES.acacia : SPECIES.palm;
+    case BIOME.prairie: return roll < 0.025 ? SPECIES.oak : SPECIES.birch;
+    case BIOME.tundra: return roll < 0.11 ? SPECIES.spruce : SPECIES.fir;
+    case BIOME.lake: return roll < 0.2 ? SPECIES.birch : picked;
     default: return picked;
   }
 }
@@ -856,6 +1077,105 @@ function scatterExtras(
     const clearing = (noise.fbm(x / 28, z / 28, 2) + 1) / 2 < 0.3;
     if (rand() < (clearing ? 0.12 : 0.02) && sampleHeight(t, x, z) > W + 0.4 && free(x, z, 0.3, 0.2)) add('rare_flower', x, z, 0.8 + rand() * 0.5);
   });
+}
+
+/**
+ * Gen 4 biome plants (own RNG): mangrove trees standing in the tidal flats,
+ * cacti and dead bushes in the desert, tall grass on the prairie and the
+ * savanna, ferns and mushrooms in the rainforest, rocks on the tundra,
+ * reeds round the lake with fish in it, and palms at a desert oasis.
+ */
+function scatterBiomeDecor(
+  t: TerrainData, island: IslandShape, out: PropPlacement[], nearTrunk: (x: number, z: number, d: number) => boolean,
+): void {
+  const cfg = t.cfg;
+  const W = cfg.waterLevel;
+  const half = cfg.size / 2;
+  const rand = mulberry32(cfg.seed + 9090);
+  const sp = t.spawn;
+  const add = (kind: PropKind, x: number, z: number, scale: number, variant = Math.floor(rand() * 4), y?: number): void => {
+    out.push({ kind, position: { x, y: y ?? sampleHeight(t, x, z), z }, rotationY: rand() * Math.PI * 2, scale, variant, chunk: chunkIndex(t, x, z) });
+  };
+  const clear = (x: number, z: number, r: number): boolean =>
+    Math.hypot(x - sp.x, z - sp.z) > cfg.spawnClearRadius + 2 && !nearTrunk(x, z, r) &&
+    !island.caves.some((c) => insideCave(c, x, z, r + 1.5) || caveClearZone(c, x, z));
+  const grid = (cell: number, f: (x: number, z: number) => void): void => {
+    for (let gz = -half + cell / 2; gz < half; gz += cell) {
+      for (let gx = -half + cell / 2; gx < half; gx += cell) f(gx + (rand() - 0.5) * cell * 0.9, gz + (rand() - 0.5) * cell * 0.9);
+    }
+  };
+  const biomeOf = (x: number, z: number, h: number): Biome => island.biomeAt(x, z, h);
+
+  // Mangrove trees on stilt roots, in the mud and the shallows.
+  if (island.mangroveArc) {
+    grid(3.4, (x, z) => {
+      const { d, beach, mangrove = 0 } = island.zone(x, z);
+      const h = sampleHeight(t, x, z);
+      if (mangrove < 0.5 || d < -12 || d > beach + 4 || h < W - 0.75 || rand() > 0.55 || !clear(x, z, 0.8)) return;
+      add('tree', x, z, 0.8 + rand() * 0.45, SPECIES.mangrove * 4 + Math.floor(rand() * 4));
+    });
+  }
+
+  // Inland plants by biome.
+  grid(1.9, (x, z) => {
+    const { d, beach } = island.zone(x, z);
+    if (d - beach < 1) return;
+    const h = sampleHeight(t, x, z);
+    if (h < W + 0.1 || sampleSlope(t, x, z) > 0.5) return;
+    const b = biomeOf(x, z, h);
+    const r = rand();
+    switch (b) {
+      case BIOME.prairie:
+        if (r < 0.5 && clear(x, z, 0.4)) add('tall_grass', x, z, 0.85 + rand() * 0.4, Math.floor(rand() * 2));
+        else if (r < 0.515 && clear(x, z, 0.4)) add('rare_flower', x, z, 0.8 + rand() * 0.4);
+        break;
+      case BIOME.savanna:
+        if (r < 0.2 && clear(x, z, 0.4)) add('tall_grass', x, z, 0.8 + rand() * 0.4, 2 + Math.floor(rand() * 2));
+        else if (r < 0.215 && clear(x, z, 0.6)) add('dead_bush', x, z, 0.8 + rand() * 0.5);
+        break;
+      case BIOME.desert:
+        if (r < 0.035 && clear(x, z, 1)) add('cactus', x, z, 0.75 + rand() * 0.5);
+        else if (r < 0.065 && clear(x, z, 0.6)) add('dead_bush', x, z, 0.7 + rand() * 0.5);
+        break;
+      case BIOME.rainforest:
+        if (r < 0.12 && clear(x, z, 0.5)) add('fiber_plant', x, z, 1 + rand() * 0.5); // ferns
+        else if (r < 0.14 && clear(x, z, 0.5)) add('mushroom', x, z, 0.8 + rand() * 0.5);
+        break;
+      case BIOME.tundra:
+        if (r < 0.02 && clear(x, z, 0.8)) add('rock', x, z, 0.5 + rand() * 0.7);
+        else if (r < 0.03 && clear(x, z, 0.6)) add('dead_bush', x, z, 0.6 + rand() * 0.4);
+        break;
+    }
+  });
+
+  // The lake: reeds along the shore, fish in the water, drinkable water.
+  const L = island.lake;
+  if (L) {
+    grid(1.5, (x, z) => {
+      const dist = Math.hypot(x - L.x, z - L.z);
+      if (dist > L.r + 4) return;
+      const h = sampleHeight(t, x, z);
+      if (h > W - 0.45 && h < W + 0.45 && rand() < 0.45 && clear(x, z, 0.4)) add('reeds', x, z, 0.8 + rand() * 0.5);
+    });
+    grid(5, (x, z) => {
+      if (Math.hypot(x - L.x, z - L.z) > L.r * 0.85 || sampleHeight(t, x, z) > W - 0.8 || rand() > 0.45) return;
+      add('fish_shoal', x, z, 1, 0, W);
+    });
+    for (let k = 0; k < 6; k++) {
+      const a = (k / 6) * Math.PI * 2;
+      const x = L.x + Math.cos(a) * L.r * 0.85, z = L.z + Math.sin(a) * L.r * 0.85;
+      out.push({ kind: 'water_source', position: { x, y: W, z }, rotationY: 0, scale: 1, variant: 0, chunk: chunkIndex(t, x, z) });
+    }
+    // An oasis: palms round a desert (or savanna) lake.
+    for (let k = 0; k < 14; k++) {
+      const a = rand() * Math.PI * 2, rr = L.r + 2 + rand() * 6;
+      const x = L.x + Math.cos(a) * rr, z = L.z + Math.sin(a) * rr;
+      const h = sampleHeight(t, x, z);
+      const around = island.regionAt(x, z);
+      if ((around !== BIOME.desert && around !== BIOME.savanna) || h < W + 0.4 || !clear(x, z, 1)) continue;
+      add('tree', x, z, 0.85 + rand() * 0.3, SPECIES.palm * 4 + Math.floor(rand() * 4));
+    }
+  }
 }
 
 /** Signed smallest difference between two angles, in (−π, π]. */

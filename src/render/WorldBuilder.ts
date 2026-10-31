@@ -14,7 +14,7 @@ import { LAYER_MEAN } from './Textures';
 import { treeShape } from '../world/TreeSpecies';
 
 /** Kinds whose variant changes the mesh. */
-const VARIANT_MESH: ReadonlySet<PropKind> = new Set<PropKind>(['rock', 'berry_bush', 'metal_rock', 'obsidian_rock', 'crystal', 'rare_flower']);
+const VARIANT_MESH: ReadonlySet<PropKind> = new Set<PropKind>(['rock', 'berry_bush', 'metal_rock', 'obsidian_rock', 'crystal', 'rare_flower', 'cactus', 'dead_bush', 'tall_grass', 'reeds']);
 
 export interface Chunk {
   group: THREE.Group;
@@ -270,6 +270,14 @@ const TINT = {
   dry: new THREE.Color(1.25, 1.12, 0.8),
   highland: new THREE.Color(1.0, 0.98, 0.9),
   cave: new THREE.Color(0.7, 0.68, 0.66),
+  // Gen 4 biomes.
+  mud: new THREE.Color(0.66, 0.62, 0.5),
+  rainforest: new THREE.Color(0.66, 0.95, 0.6),
+  savanna: new THREE.Color(1.6, 1.22, 0.55),
+  desert: new THREE.Color(1.1, 0.98, 0.84),
+  prairie: new THREE.Color(0.98, 1.14, 0.8),
+  tundra: new THREE.Color(0.86, 0.92, 0.88),
+  lakeshore: new THREE.Color(0.85, 1.02, 0.8),
 };
 
 const sstep = (a: number, b: number, v: number): number => {
@@ -291,7 +299,10 @@ function terrainLayers(L: Float32Array, tint: THREE.Color, h: number, slope: num
   // Beach biome (incl. gen 3 dunes, which rise well above the usual beach
   // height) stays sand; only the dune crests get a little beach grass.
   // Steep beach-biome ground is the foot of a gen 3 cliff: rock, not sand.
-  const beach = biome === 6 ? 0 : biome === 0 ? (1 - sstep(1.6, 2.8, above) * 0.35) * (1 - sstep(0.22, 0.38, slope)) : 1 - sstep(0.55, 0.95, above);
+  const beach = biome === 6 || biome === 7 ? 0
+    : biome === 0 ? (1 - sstep(1.6, 2.8, above) * 0.35) * (1 - sstep(0.22, 0.38, slope))
+    : biome === 10 ? 1 - sstep(0.22, 0.38, slope) // desert: sand dunes, rock only on steep ground
+    : 1 - sstep(0.55, 0.95, above);
   const rock = Math.max(sstep(0.22, 0.38, slope), biome === 4 ? 0.2 + r2 * 0.25 : 0);
   let snow = 0, grass = 0, dirt = 0;
   switch (biome) {
@@ -301,6 +312,13 @@ function terrainLayers(L: Float32Array, tint: THREE.Color, h: number, slope: num
     case 4: grass = 0.75; dirt = 0.25; tint.copy(TINT.highland); break;
     case 3: grass = 1; tint.copy(TINT.meadow).lerp(TINT.dry, r2 * 0.5); break;
     case 2: grass = 0.55; dirt = 0.45; tint.copy(TINT.jungle); break;
+    case 7: dirt = 0.85; grass = 0.15; tint.copy(TINT.mud); break;
+    case 8: grass = 0.5; dirt = 0.5; tint.copy(TINT.rainforest); break;
+    case 9: grass = 0.7; dirt = 0.3; tint.copy(TINT.savanna).lerp(TINT.dry, r2 * 0.3); break;
+    case 10: tint.copy(TINT.desert); break;
+    case 11: grass = 1; tint.copy(TINT.prairie).lerp(TINT.meadow, r2 * 0.4); break;
+    case 12: grass = 0.55; dirt = 0.2; snow = r2 < 0.45 ? 0.25 + r2 : 0.05; tint.copy(TINT.tundra); break;
+    case 13: grass = 0.6; dirt = 0.4; tint.copy(TINT.lakeshore); break;
     default: grass = 0.45; dirt = 0.55; tint.copy(TINT.forest); break;
   }
   const land = 1 - beach;
@@ -311,7 +329,7 @@ function terrainLayers(L: Float32Array, tint: THREE.Color, h: number, slope: num
   L[3] = rock * land;
   L[4] = snow * soft;
   if (biome === 5 && rock > 0) L[4] += rock * land * 0.25; // snow lingers on ledges
-  if (above < 0.32) tint.lerp(TINT.wetSand, sstep(0.32, -0.1, above)); // wet sand at the waterline
+  if (above < 0.32 && biome !== 7) tint.lerp(TINT.wetSand, sstep(0.32, -0.1, above)); // wet sand at the waterline
   if (above < 0) tint.lerp(DEEP_TINT, Math.min(1, -above / 4) * 0.85); // sea floor darkens with depth
   const v = 0.94 + Math.abs((Math.sin(seed * 12.9898) * 43758.5453) % 1) * 0.08;
   tint.multiplyScalar(v);
