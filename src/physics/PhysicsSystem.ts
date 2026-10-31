@@ -1,4 +1,4 @@
-import type { System, World } from '../core/ecs/World';
+import type { Entity, System, World } from '../core/ecs/World';
 import { PlayerControlled, SurvivorC, Transform } from '../components';
 import { MOVEMENT } from '../systems/PlayerControlSystem';
 import { PLAYER_SHAPE, PhysicsBody, type PhysicsWorld } from './PhysicsWorld';
@@ -30,6 +30,8 @@ export class PhysicsSystem implements System {
 
   /** Feet deeper than this below the surface → swimming (eyes stay above water). */
   static readonly SWIM_DEPTH = 1.3;
+  /** Where each idle, grounded player stopped (see the slope pin in fixedUpdate). */
+  private readonly anchors = new Map<Entity, { x: number; z: number }>();
 
   constructor(
     private readonly physics: PhysicsWorld,
@@ -91,14 +93,32 @@ export class PhysicsSystem implements System {
       }
 
       // Gravity on a frictionless capsule makes it slide down slopes while
-      // idle. Cancel the slide when grounded and not trying to move.
-      if (pc.grounded && pc.desiredVelocity.x === 0 && pc.desiredVelocity.z === 0 && body.velocity.y <= 0.1) {
+      // idle: the contact pushes it sideways during the step. Standing still
+      // on the ground, the player is pinned where they stopped (restored
+      // after the step below); moving, jumping or falling releases the pin.
+      const idle = pc.grounded && !pc.swimming && pc.desiredVelocity.x === 0 && pc.desiredVelocity.z === 0 && body.velocity.y <= 0.1;
+      if (idle) {
         body.velocity.y = Math.max(body.velocity.y, 0);
+        if (!this.anchors.has(e)) this.anchors.set(e, { x: body.position.x, z: body.position.z });
+      } else {
+        this.anchors.delete(e);
       }
     }
 
     // 3. Step exactly one fixed tick.
     this.physics.world.step(dt);
+
+    for (const [e, a] of this.anchors) {
+      const pb = world.get(e, PhysicsBody);
+      if (!pb) {
+        this.anchors.delete(e);
+        continue;
+      }
+      pb.body.position.x = a.x;
+      pb.body.position.z = a.z;
+      pb.body.velocity.x = 0;
+      pb.body.velocity.z = 0;
+    }
 
     // Stairs: keep the player's feet on the flight (up or down) unless jumping.
     for (const e of world.query(PlayerControlled, PhysicsBody)) {

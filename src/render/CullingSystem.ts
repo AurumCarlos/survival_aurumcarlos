@@ -15,8 +15,9 @@ import { RenderObject } from './Renderer';
  *
  *  - Terrain chunks: AABB vs frustum and distance (the fog distance: nothing
  *    past it is visible). The box is inflated by `shadowMargin`.
- *  - Props: PropBatches.update() does distance culling and tree LOD per
- *    instance (three frustum-culls each instance).
+ *  - Props: PropBatches.update() does distance culling per instance and
+ *    gives the detailed mesh to the N nearest trees (three frustum-culls
+ *    each instance).
  *  - Entities with Cullable: bounding sphere vs frustum + max distance.
  *    Also exposes `visible` back to the ECS so far-away creatures can be
  *    simulated at a lower rate by AI (future LOD hook).
@@ -34,7 +35,7 @@ export class CullingSystem implements System {
     private readonly chunks: readonly Chunk[],
     private readonly props: PropBatches | null,
     /** Prop distances; `view` (the fog distance: nothing past it shows) also culls terrain chunks. */
-    private readonly distances: () => { view: number; treeLod: number; smallProps: number } = () => ({ view: 170, treeLod: 32, smallProps: 50 }),
+    private readonly distances: () => { view: number; detailedTrees: number; smallProps: number } = () => ({ view: 170, detailedTrees: 15, smallProps: 50 }),
     private readonly shadowMargin = 12,
   ) {}
 

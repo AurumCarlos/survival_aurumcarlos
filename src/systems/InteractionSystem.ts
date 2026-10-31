@@ -3,6 +3,7 @@ import type { EventBus } from '../core/EventBus';
 import type { InputManager } from '../core/Input';
 import { PlayerControlled, ResourceC, StealthState, SurvivorC, Transform } from '../components';
 import { itemDef } from '../data/items';
+import { SIM } from '../data/settings';
 import type { ItemId, ItemStack, Resource, Survivor } from '../data/schema';
 import type { InventoryGrid } from './inventory/InventoryGrid';
 import type { SpatialHash } from '../core/SpatialHash';
@@ -92,7 +93,7 @@ export function harvest(s: Survivor, inv: InventoryGrid, r: Resource, rng: () =>
     if (y.favour === 'hands') m = (fx.fit === 'right' ? 0.4 : 1.5) * s.modifiers.gatherSpeed;
     else if (y.favour && heldTool?.tags.includes(y.favour)) m = heldTool.gatherMultiplier * s.modifiers.gatherSpeed;
     // Fractional yields are resolved stochastically so 0.5× isn't always 0.
-    const raw = base * m;
+    const raw = base * m * SIM.harvestYield;
     const qty = Math.floor(raw) + (rng() < raw - Math.floor(raw) ? 1 : 0);
     if (qty <= 0) continue;
     const left = inv.add(y.item, qty);
@@ -102,7 +103,7 @@ export function harvest(s: Survivor, inv: InventoryGrid, r: Resource, rng: () =>
 
   // Any tool used on a tool-relevant resource wears.
   if (held?.durability !== undefined && (fx.fit === 'right' || fx.fit === 'wrong')) {
-    held.durability -= 1;
+    held.durability -= 1 / SIM.toolDurability;
     if (held.durability <= 0) {
       s.hotbar[s.activeHotbarSlot] = null;
       res.toolBroke = true;
@@ -112,7 +113,7 @@ export function harvest(s: Survivor, inv: InventoryGrid, r: Resource, rng: () =>
   if (!r.infinite) {
     r.hitPoints = Math.max(0, r.hitPoints - fx.damage);
     if (r.hitPoints <= 0) {
-      r.respawnTimer = r.respawnSeconds;
+      r.respawnTimer = r.respawnSeconds * SIM.resourceRespawn;
       res.depleted = true;
     }
   }
@@ -134,6 +135,8 @@ export class InteractionSystem implements System {
   focused: Entity | null = null;
   /** While true (a box or station is targeted), E does not harvest. */
   blocked: () => boolean = () => false;
+  /** While true (build mode: the wheel picks the piece), the wheel doesn't change hotbar slot. */
+  wheelBlocked: () => boolean = () => false;
 
   constructor(
     private readonly input: InputManager,
@@ -155,6 +158,14 @@ export class InteractionSystem implements System {
     const s = world.require(player, SurvivorC);
     const pc = world.require(player, PlayerControlled);
     const p = world.require(player, Transform).position;
+
+    // Mouse wheel: next / previous hotbar slot (wrapping), like number keys 1–6.
+    const wheel = this.input.wheelDelta;
+    if (wheel !== 0 && s.alive && !this.wheelBlocked()) {
+      const n = s.hotbar.length;
+      s.activeHotbarSlot = (((s.activeHotbarSlot + Math.sign(wheel)) % n) + n) % n;
+      this.events.emit('inventory:changed', { entity: player });
+    }
 
     this.focused = this.blocked() ? null : this.findTarget(world, p.x, p.z, pc.yaw);
 

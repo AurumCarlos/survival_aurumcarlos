@@ -17,14 +17,15 @@ import { DayNightCycle, DEFAULT_DAY_NIGHT } from '../src/systems/DayNightCycle';
 import { EnvironmentSystem } from '../src/systems/EnvironmentSystem';
 import { SurvivalStatusManager } from '../src/systems/SurvivalStatusManager';
 import { parseMapConfig, toTerrainConfig } from '../src/world/MapConfig';
-import { BIOME, GENERATOR_VERSION, generateTerrain, insideCave, sampleHeight, sampleSlope, ISLAND, type TerrainData } from '../src/world/TerrainGenerator';
+import { BIOME, GENERATOR_VERSION, coastProfiles, generateTerrain, insideCave, sampleHeight, sampleSlope, ISLAND, type TerrainData } from '../src/world/TerrainGenerator';
 import { populateResources, spawnApexPredators } from '../src/world/WorldPopulator';
 import { Structure } from '../src/components';
 import { BuildingGrid } from '../src/systems/building/BuildingGrid';
 import { InventoryGrid } from '../src/systems/inventory/InventoryGrid';
 import { StationSystem } from '../src/systems/StationSystem';
 import { bedSpawnPoint, chooseBed, dropBelongings, revive } from '../src/systems/Respawn';
-import { BREED_TUNING, BreedingSystem, applyGrowth, growthScale } from '../src/systems/ai/BreedingSystem';
+import { BREED_TUNING, BreedingSystem, applyGrowth, breedState, growthScale } from '../src/systems/ai/BreedingSystem';
+import { SIM } from '../src/data/settings';
 
 declare const process: { exit(code: number): never };
 let failures = 0;
@@ -84,7 +85,7 @@ async function main(): Promise<void> {
   console.log('\n── Mountains, caves, biomes (generator v2) ──');
   let t256: TerrainData | null = null;
   for (const size of [128, 256, 512]) {
-    const t = generateTerrain(toTerrainConfig(parseMapConfig({ size, seed: 777, gen: GENERATOR_VERSION })));
+    const t = generateTerrain(toTerrainConfig(parseMapConfig({ size, seed: 777, gen: 2 })));
     if (size === 256) t256 = t;
     const W = t.cfg.waterLevel;
     // Beach: same check as the flat island — every direction has ≥ 10 m of flat sand, no forest on it.
@@ -125,6 +126,74 @@ async function main(): Promise<void> {
     check('no trees on the snowy peaks', snowTrees === 0);
     const legacy = generateTerrain(toTerrainConfig(parseMapConfig({ size: 256, seed: 777 })));
     check('older saves (no generator version) still regenerate the flat island', !legacy.caves && legacy.maxY - legacy.cfg.waterLevel < 9.5 && ISLAND.radius > 0);
+  }
+
+  console.log('\n── Varied coastline (generator v3) ──');
+  {
+    check('new worlds use generator v3', GENERATOR_VERSION === 3);
+    for (const seed of [777, 42, 2024]) {
+      const cfg = toTerrainConfig(parseMapConfig({ size: 256, seed, gen: 3 }));
+      const ps = coastProfiles(cfg);
+      const share = (f: (p: (typeof ps)[number]) => boolean): number => ps.filter(f).length / ps.length;
+      const cliff = share((p) => p.cliff > 0.5), dune = share((p) => p.dune > 0.5), flat = share((p) => p.cliff < 0.1 && p.dune < 0.1);
+      const t = generateTerrain(cfg);
+      const W = t.cfg.waterLevel;
+      // Cliffs: 6 m inland from the waterline the ground is already high; flat beaches stay low.
+      let tallCliff = 0, lowBeach = 0, highDune = 0, cliffRays = 0, flatRays = 0, duneRays = 0;
+      ps.forEach((p, k) => {
+        if (k % 4) return;
+        const a = (k / ps.length) * Math.PI * 2, c = Math.cos(a), sn = Math.sin(a);
+        let r = t.cfg.size / 2;
+        while (r > 0 && sampleHeight(t, c * r, sn * r) < W) r -= 0.25;
+        const h6 = sampleHeight(t, c * (r - 6), sn * (r - 6)) - W;
+        if (p.cliff > 0.9) { cliffRays++; if (h6 > 4) tallCliff++; }
+        if (p.cliff < 0.05 && p.dune < 0.05) { flatRays++; if (h6 < 0.8) lowBeach++; }
+        if (p.dune > 0.9) {
+          duneRays++;
+          let top = 0;
+          for (let dd = 0; dd < p.beach; dd += 0.5) top = Math.max(top, sampleHeight(t, c * (r - dd), sn * (r - dd)) - W);
+          if (top > 1.4) highDune++;
+        }
+      });
+      // A cove: the coastline dips ≥ 8 m below its neighbours ±15° on both sides.
+      const cove = ps.some((p, k) => p.coast < ps[(k + 15) % ps.length]!.coast - 8 && p.coast < ps[(k + ps.length - 15) % ps.length]!.coast - 8);
+      check(`seed ${seed}: some cliffs but not too many (${(cliff * 100).toFixed(0)}%), dunes (${(dune * 100).toFixed(0)}%), mostly flat beach (${(flat * 100).toFixed(0)}%), a cove`,
+        cliff > 0.08 && cliff < 0.26 && dune > 0.12 && dune < 0.38 && flat > 0.35 && !!cove);
+      check(`seed ${seed}: cliffs rise steeply from the sea, flat beaches stay flat, dunes have relief`,
+        tallCliff >= cliffRays * 0.8 && lowBeach >= flatRays * 0.9 && highDune >= duneRays * 0.7,
+        `cliffs ${tallCliff}/${cliffRays}, flat ${lowBeach}/${flatRays}, dunes ${highDune}/${duneRays}`);
+      const spawnCoast = ps[Math.round(((Math.atan2(t.spawn.z, t.spawn.x) + Math.PI * 2) % (Math.PI * 2)) / (Math.PI * 2) * ps.length) % ps.length]!;
+      check(`seed ${seed}: you wash up on a beach, not under a cliff`, spawnCoast.cliff < 0.15 && t.spawn.y - W < 1.5, `cliff ${spawnCoast.cliff.toFixed(2)}, ${(t.spawn.y - W).toFixed(2)} m`);
+
+      // The crocodile still patrols smoothly along cliffs and into coves.
+      const nav = new NavGrid(buildNavGrid(t));
+      const world = new World();
+      const crocs = spawnApexPredators(world, { terrain: t, nav: buildNavGrid(t) }, parseMapConfig({ size: 256, seed, gen: 3 }), [])
+        .filter((e) => world.require(e, Creature).species === 'crocodile');
+      const apex = new ApexSystem({
+        terrainHeight: (x, z) => sampleHeight(t, x, z), groundHeight: (x, z) => sampleHeight(t, x, z), waterLevel: W,
+        paths: new FlowFieldService(nav), isNight: () => false, survival: new SurvivalStatusManager(), events: new EventBus(), half: 128,
+      });
+      spawnPlayer(world, { x: 0, y: 30, z: 0 });
+      let maxStill = 0, flips = 0;
+      for (const croc of crocs) {
+        const cp = world.require(croc, Transform).position, k = world.require(croc, Creature);
+        let still = 0, lastTurn = 0;
+        for (let i = 0; i < 60 * 120; i++) {
+          const x0 = cp.x, z0 = cp.z, h0 = k.heading;
+          apex.fixedUpdate(world, 1 / 60);
+          const mode = world.require(croc, AIBrain).blackboard.apex!.mode;
+          still = Math.hypot(cp.x - x0, cp.z - z0) < 0.001 && mode !== 'lurk' ? still + 1 : 0;
+          maxStill = Math.max(maxStill, still);
+          const dh = Math.atan2(Math.sin(k.heading - h0), Math.cos(k.heading - h0));
+          const turn = Math.abs(dh) < 0.004 ? 0 : Math.sign(dh);
+          if (turn !== 0 && lastTurn !== 0 && turn !== lastTurn) flips++;
+          if (turn !== 0) lastTurn = turn;
+        }
+      }
+      check(`seed ${seed}: crocodiles keep swimming smoothly along the new coast`, crocs.length > 0 && maxStill < 120 && flips < 40 * crocs.length,
+        `${crocs.length} crocs, stuck ≤ ${(maxStill / 60).toFixed(1)} s, ${flips} reversals in 2 min each`);
+    }
   }
 
   console.log('\n── Crocodile ──');
@@ -327,24 +396,36 @@ async function main(): Promise<void> {
     check('the empty bag disappears', !world.get(bag!, Structure));
   }
 
-  console.log('\n── Animals breed; babies grow up ──');
+  console.log('\n── Animals breed like real ones; babies grow up ──');
   {
     const world = new World();
     const events = new EventBus();
     let seed = 3;
     const rng = (): number => ((seed = (seed * 16807) % 2147483647) / 2147483647);
-    const breed = new BreedingSystem(events, { deer: 4, wolf: 2 }, () => true, () => 0, rng);
+    const breed = new BreedingSystem(events, () => true, () => 0, rng);
+    // Even seeds are female, odd ones male.
     const d1 = spawnCreature(world, 'deer', { x: 0, y: 0, z: 0 }, 1);
-    spawnCreature(world, 'deer', { x: 5, y: 0, z: 0 }, 2);
-    spawnCreature(world, 'wolf', { x: 50, y: 0, z: 0 }, 3); // a lone wolf: can't breed
+    const doe = spawnCreature(world, 'deer', { x: 2, y: 0, z: 0 }, 2);
+    spawnCreature(world, 'boar', { x: 30, y: 0, z: 0 }, 3); // two males side by side: no piglets
+    spawnCreature(world, 'boar', { x: 31, y: 0, z: 0 }, 5);
+    const sow = spawnCreature(world, 'boar', { x: 60, y: 0, z: 0 }, 4); // a sow with a boar 15 m away: he comes to her
+    const boar = spawnCreature(world, 'boar', { x: 75, y: 0, z: 0 }, 7);
+    spawnCreature(world, 'wolf', { x: 150, y: 0, z: 0 }, 9); // a lone wolf: can't breed
+    check('animals are male or female', breedState(world, d1).sex === 'male' && breedState(world, doe).sex === 'female');
     let born = 0;
     events.on('creature:born', () => born++);
     const run = (sec: number): void => { for (let t = 0; t < sec; t += 1) breed.fixedUpdate(world, 1); };
-    run(BREED_TUNING.interval * 12);
+    run(SIM.breedInterval * 3);
+    const pregnant = breedState(world, doe).pregnant !== undefined;
+    check('a male and a female close together mate; the fawn comes after a gestation', pregnant && born === 0, `pregnant ${pregnant}, ${born} born`);
+    run(SIM.gestationSeconds + 1);
     const deer = [...world.query(Creature)].filter((e) => world.require(e, Creature).species === 'deer');
+    check('…then she gives birth next to her and rests before mating again', deer.length > 2 && breedState(world, doe).rest !== undefined && breedState(world, doe).pregnant === undefined, `${deer.length} deer`);
+    const boars = [...world.query(Creature)].filter((e) => world.require(e, Creature).species === 'boar');
     const wolves = [...world.query(Creature)].filter((e) => world.require(e, Creature).species === 'wolf');
-    check('two adult deer have fawns, up to the population cap', born > 0 && deer.length > 2 && deer.length <= Math.round(4 * BREED_TUNING.capFactor), `${deer.length} deer`);
-    check('a lone wolf has no pups', wolves.length === 1);
+    check('two males, a lone wolf, or a male too far away never have young', boars.length === 4 && wolves.length === 1);
+    const sw = world.require(sow, AIBrain).blackboard.waypoints, bw = world.require(boar, AIBrain).blackboard.waypoints;
+    check('a male within courtship distance follows the female (takes her patrol route)', bw.length === sw.length && bw.every((w, i) => w.x === sw[i]!.x && w.z === sw[i]!.z));
     const baby = deer.find((e) => world.require(e, Creature).growth !== undefined) ?? deer.find((e) => e !== d1)!;
     world.require(baby, Creature).growth = BREED_TUNING.birthGrowth;
     applyGrowth(world, baby);

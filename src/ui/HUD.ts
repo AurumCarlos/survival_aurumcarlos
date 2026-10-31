@@ -6,7 +6,7 @@ import { BuilderC } from '../systems/building/BuildingSystem';
 import { PIECE_COSTS, PIECE_LABEL, PIECE_ORDER } from '../systems/building/BuildingGrid';
 import { InventoryGrid } from '../systems/inventory/InventoryGrid';
 import { BEST_TOOL_NAME, toolEffect } from '../systems/InteractionSystem';
-import { Exposure, ResourceC, StealthState, Transform, SurvivorC } from '../components';
+import { Exposure, ResourceC, StealthState, Transform, SurvivorC, PlayerControlled } from '../components';
 import type { StatusEffectId } from '../data/schema';
 import type { DayNightCycle } from '../systems/DayNightCycle';
 import type { SurvivalStatusManager } from '../systems/SurvivalStatusManager';
@@ -34,6 +34,8 @@ export class HUD {
     private readonly events: EventBus,
     private readonly cycle: DayNightCycle,
     private readonly survival: SurvivalStatusManager,
+    /** Fraction of the native resolution being rendered (shown next to the FPS when automatic quality lowers it). */
+    private readonly resolutionScale: () => number = () => 1,
   ) {
     this.root = document.createElement('div');
     this.root.className = 'hud';
@@ -44,6 +46,7 @@ export class HUD {
       <div class="crosshair"></div>
       <div class="clock" data-k="clock"></div>
       <div class="fps" data-k="fps"></div>
+      <div class="compass"><div class="compass-track" data-k="compass">${compassLabels()}</div><div class="compass-mark"></div></div>
       <div class="stealth" data-k="stealth" title="Detection"><span data-k="stealthFill"></span></div>
       <div class="vitals">
         ${['health', 'hunger', 'thirst', 'energy', 'stamina'].map((k) => `
@@ -85,6 +88,12 @@ export class HUD {
   }
 
   update(world: World, player: Entity | undefined, dt: number, loop: GameLoop, prompt: string | null, progress: number | null): void {
+    // Compass every frame (it must turn with the mouse). Camera yaw 0 looks toward −Z = north.
+    const pc = player !== undefined ? world.get(player, PlayerControlled) : undefined;
+    if (pc) {
+      const heading = ((((-pc.yaw * 180) / Math.PI) % 360) + 360) % 360;
+      this.el['compass']!.style.transform = `translateX(${-(heading + 360) * COMPASS_PX_PER_DEG}px)`;
+    }
     this.acc += dt;
     if (this.acc < 0.1) return;
     this.acc = 0;
@@ -93,7 +102,8 @@ export class HUD {
     this.el['clock']!.textContent = `Day ${this.cycle.day} · ${pad(Math.floor(h))}:${pad(Math.floor((h % 1) * 60))} · ${this.cycle.ambientTempC.toFixed(0)}°C${this.cycle.raining ? ' · rain' : ''}`;
     const fps = loop.stats.fps;
     const fpsEl = this.el['fps']!;
-    fpsEl.textContent = `${fps.toFixed(0)} FPS`;
+    const scale = this.resolutionScale();
+    fpsEl.textContent = scale < 0.995 ? `${fps.toFixed(0)} FPS · ${Math.round(scale * 100)}%` : `${fps.toFixed(0)} FPS`;
     fpsEl.dataset['level'] = fps >= 50 ? 'good' : fps >= 30 ? 'ok' : 'bad';
 
     if (player === undefined) return;
@@ -233,4 +243,21 @@ function pad(n: number): string {
 }
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+}
+
+/** Pixels per degree on the compass strip (the visible window is ~120°). */
+const COMPASS_PX_PER_DEG = 2.2;
+
+/** Cardinal and intercardinal labels plus ticks, three turns long so the strip can scroll seamlessly. */
+function compassLabels(): string {
+  const names = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+  let html = '';
+  for (let deg = 0; deg <= 1080; deg += 15) {
+    const x = deg * COMPASS_PX_PER_DEG;
+    const name = deg % 45 === 0 ? names[(deg / 45) % 8]! : '';
+    html += name
+      ? `<span class="cl${name.length === 1 ? ' major' : ''}" style="left:${x}px">${name}</span>`
+      : `<i style="left:${x}px"></i>`;
+  }
+  return html;
 }

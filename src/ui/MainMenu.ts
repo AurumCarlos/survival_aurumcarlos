@@ -2,6 +2,8 @@ import type { AppState } from '../app/GameStateMachine';
 import type { SaveMeta } from '../persistence/SaveStore';
 import { GENERATOR_VERSION } from '../world/TerrainGenerator';
 import { MAP_LIMITS, MAP_PRESETS, MapConfigError, parseMapConfig, randomSeed, type MapConfig } from '../world/MapConfig';
+import type { AllSettings } from '../data/settings';
+import { formatValue, settingDef, settingsHtml, type SettingsTab } from './SettingsPage';
 
 export interface MenuHandlers {
   onNewGame(): void;
@@ -24,6 +26,9 @@ export interface MenuHandlers {
   onResume(): void;
   onSave(): void;
   onQuitToMenu(): void;
+  /** A setting was changed on the settings page (applies immediately). */
+  onSettingChange(section: SettingsTab, key: string, value: number | string | boolean): void;
+  onSettingsReset(section: SettingsTab): void;
 }
 
 export interface MenuModel {
@@ -41,6 +46,8 @@ export interface MenuModel {
   freshSession: boolean;
   busy: boolean;
   storageKind: 'indexeddb' | 'memory' | null;
+  /** Current settings (the App keeps this object up to date). */
+  settings: AllSettings;
 }
 
 /**
@@ -60,6 +67,9 @@ export class MainMenu {
   private confirmDelete: string | null = null;
   private renaming: string | null = null;
   private savingAs = false;
+  /** Settings page open over the main menu or the pause menu. */
+  private settingsOpen = false;
+  private settingsTab: SettingsTab = 'graphics';
 
   constructor(container: HTMLElement, private readonly h: MenuHandlers, model: MenuModel) {
     this.model = model;
@@ -96,6 +106,12 @@ export class MainMenu {
     this.root.classList.toggle('show', state !== 'playing');
     this.root.dataset['state'] = state;
 
+    if (this.settingsOpen && (state === 'menu' || state === 'paused')) {
+      this.root.innerHTML = settingsHtml(this.settingsTab, m.settings);
+      return;
+    }
+    this.settingsOpen = false;
+
     switch (state) {
       case 'menu':
         if (this.view === 'saves') {
@@ -109,6 +125,7 @@ export class MainMenu {
             <button data-act="continue" ${m.save ? '' : 'disabled'}>Continue${m.save ? `<small>${escapeHtml(m.save.name)} · day ${m.save.day} · ${m.save.size} m · ${m.save.minutes} min · ${timeAgo(m.save.savedAt)}</small>` : '<small>No saved game</small>'}</button>
             <button data-act="saves">Load game<small>${m.saves.length ? `${m.saves.length} saved world${m.saves.length > 1 ? 's' : ''} — load, rename, copy, delete, import/export` : 'No saved worlds yet · import a save file'}</small></button>
             <button data-act="new" class="primary">New game</button>
+            <button data-act="settings">Settings<small>Graphics, frame rate, and every simulation setting</small></button>
             ${m.storageKind === 'memory' ? '<p class="warn-line">Saving is unavailable in this browser mode — progress will be lost on reload.</p>' : ''}
           </div>`;
         break;
@@ -162,8 +179,9 @@ export class MainMenu {
             ${m.freshSession ? '' : this.savingAs
               ? `<form class="save-as" data-form="save-as"><input name="asname" type="text" maxlength="40" placeholder="New save name" value="${escapeAttr(`${m.current?.name ?? 'Island'} (2)`)}"><button type="submit" class="primary" ${m.busy ? 'disabled' : ''}>Save</button><button type="button" data-act="saveas-cancel">✕</button></form>`
               : `<button data-act="saveas" ${m.busy ? 'disabled' : ''}>Save as new…<small>Keeps this world in a separate save from now on</small></button>`}
+            <button data-act="settings">Settings</button>
             <button data-act="quit" ${m.busy ? 'disabled' : ''}>Save &amp; quit to menu</button>
-            <p class="keys">WASD move · Shift sprint · C crouch · E harvest · I inventory · LMB swing · RMB throw · B build · 1–6 hotbar</p>
+            <p class="keys">WASD move · Shift sprint · C crouch · E harvest · I inventory · LMB swing · RMB throw · B build · 1–6 / wheel hotbar</p>
           </div>`;
         break;
       case 'gameover':
@@ -188,6 +206,7 @@ export class MainMenu {
   /** Show the title screen (not the saves list) next time the menu opens. */
   resetView(): void {
     this.view = 'main';
+    this.settingsOpen = false;
     this.savingAs = false;
   }
 
@@ -277,6 +296,18 @@ export class MainMenu {
       case 'saveas-cancel':
         this.savingAs = false;
         return this.render(this.state);
+      case 'settings':
+        this.settingsOpen = true;
+        return this.render(this.state);
+      case 'settings-back':
+        this.settingsOpen = false;
+        return this.render(this.state);
+      case 'set-tab':
+        this.settingsTab = (['graphics', 'controls', 'sim'] as const).find((t) => t === target.dataset['tab']) ?? 'graphics';
+        return this.render(this.state);
+      case 'set-reset':
+        this.h.onSettingsReset(this.settingsTab);
+        return this.render(this.state);
       case 'new': return this.h.onNewGame();
       case 'back': return this.h.onBack();
       case 'menu': return this.h.onQuitToMenu();
@@ -296,6 +327,17 @@ export class MainMenu {
 
   private readonly onInput = (e: Event): void => {
     const t = e.target as HTMLInputElement;
+    const section = t.dataset['section'] as SettingsTab | undefined;
+    if (section && t.dataset['key']) {
+      // Settings page: apply live, update the read-out, no re-render (a slider being dragged must survive).
+      const d = settingDef(section, t.dataset['key']);
+      if (!d) return;
+      const value = d.kind.type === 'toggle' ? t.checked : d.kind.type === 'range' ? Number(t.value) : t.value;
+      const out = t.parentElement?.querySelector('output');
+      if (out) out.textContent = formatValue(d, value);
+      this.h.onSettingChange(section, d.key, value);
+      return;
+    }
     if (t.name === 'preset') {
       this.form.size = Number(t.value);
       const size = this.root.querySelector<HTMLInputElement>('input[name=size]');

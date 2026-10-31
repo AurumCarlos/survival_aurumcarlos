@@ -226,6 +226,8 @@ export interface Blackboard {
   stuckTimer: number;
   /** Crocodile / bear behaviour (ApexSystem), saved with the blackboard. */
   apex?: ApexState;
+  /** Breeding (BreedingSystem), saved with the blackboard: sex, and pregnancy / rest timers in seconds. */
+  breed?: { sex: 'male' | 'female'; pregnant?: number; rest?: number };
 }
 
 /**

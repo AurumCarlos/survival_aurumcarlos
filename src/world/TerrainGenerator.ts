@@ -13,6 +13,9 @@ import { SPECIES } from './TreeSpecies';
  *   sea floor ─► shallow turquoise lagoon ─► very flat white beach ring ─►
  *   forest edge ─► dense fir forest on gentle low hills (+ freshwater ponds)
  *
+ * Gen 3 varies the shore around the island: flat beaches, dunes, stretches
+ * of cliffs with deep water at their foot, and coves (see COAST).
+ *
  * Every zone is measured in *metres from the coastline* along the radius, so
  * the beach keeps the same width all the way round regardless of map size.
  */
@@ -34,13 +37,14 @@ export interface TerrainConfig {
   chunkSize: number;
   /**
    * Generator version. 1 = the flat desert island (kept so older saves
-   * regenerate exactly the same world); 2 = mountains, caves and biomes.
+   * regenerate exactly the same world); 2 = mountains, caves and biomes;
+   * 3 = a varied coastline (flat beaches, dunes, cliffs and coves).
    */
   gen?: number;
 }
 
 /** Newest generator; new worlds use it. */
-export const GENERATOR_VERSION = 2;
+export const GENERATOR_VERSION = 3;
 
 export const BIOME = { beach: 0, forest: 1, jungle: 2, meadow: 3, highland: 4, snow: 5, cave: 6 } as const;
 export type Biome = (typeof BIOME)[keyof typeof BIOME];
@@ -108,6 +112,47 @@ export const ISLAND = {
   seaDepth: 6,
 } as const;
 
+/**
+ * Gen 3 coastline. Around the island, low-frequency noise picks stretches of
+ * cliffs (about a sixth of the shore, coves included) and of dunes; everything else stays the
+ * flat beach. Coves are small inlets with a beach at the back, set where the
+ * shore is cliffy so they are framed by rock.
+ */
+export const COAST = {
+  /**
+   * Share of the shoreline that is cliff / dunes (each island is calibrated
+   * on its own noise, so every seed gets about this much); the rest is flat
+   * beach. `blend` is the share spent fading from one type to the next.
+   */
+  cliffShare: 0.22,
+  duneShare: 0.25,
+  blend: 0.1,
+  /** Cliff height above the sea (m). */
+  cliffMin: 5,
+  cliffMax: 11,
+  /** Dunes make the beach this much wider, and rise up to duneHeight (m). */
+  duneWiden: 1.8,
+  duneHeight: 3.6,
+  /** Cove depth (m) into the coastline, and its half-width relative to the depth. */
+  coveDepthMin: 12,
+  coveDepthMax: 22,
+  coveWidth: 1.6,
+} as const;
+
+/** The coast at one angle around the island. */
+export interface CoastProfile {
+  /** Waterline radius. */
+  coast: number;
+  /** Beach width (m). */
+  beach: number;
+  /** 0..1 how much of a cliff this stretch is (gen 3). */
+  cliff: number;
+  /** 0..1 how dune-covered the beach is (gen 3). */
+  dune: number;
+  /** Cliff top height above the sea (m). */
+  cliffH: number;
+}
+
 export type PropKind = ResourceKind | 'grass_tuft' | 'log';
 
 export interface PropPlacement {
@@ -163,6 +208,9 @@ class IslandShape {
   private readonly hills: Perlin;
   private readonly crags: Perlin;
   private readonly moistureNoise: Perlin;
+  private readonly coastKind: Perlin;
+  /** Coves (gen 3): centre angle, angular half-width, depth (m). */
+  readonly coves: Array<{ a: number; aw: number; depth: number }> = [];
 
   constructor(readonly cfg: TerrainConfig) {
     this.half = cfg.size / 2;
@@ -172,7 +220,63 @@ class IslandShape {
     this.hills = new Perlin(cfg.seed);
     this.crags = new Perlin(cfg.seed + 4242);
     this.moistureNoise = new Perlin(cfg.seed + 777);
+    this.coastKind = new Perlin(cfg.seed + 1213);
     this.gen = cfg.gen ?? 1;
+    if (this.gen >= 3) {
+      this.calibrateCoast();
+      this.placeCoves();
+    }
+  }
+
+  /** Noise thresholds for cliffs and dunes, calibrated per island (see COAST). */
+  private cliffRange: [number, number] = [0, 0];
+  private duneRange: [number, number] = [0, 0];
+
+  private cliffNoise(c: number, s: number): number {
+    return this.coastKind.fbm(c * 1.3 + 5, s * 1.3 - 9, 3);
+  }
+
+  private duneNoise(c: number, s: number): number {
+    return this.coastKind.fbm(c * 1.7 - 40, s * 1.7 + 22, 2);
+  }
+
+  /** Thresholds such that about cliffShare / duneShare of the shore gets each type. */
+  private calibrateCoast(): void {
+    const cn: number[] = [], dn: number[] = [];
+    for (let k = 0; k < 360; k++) {
+      const a = (k / 360) * Math.PI * 2;
+      cn.push(this.cliffNoise(Math.cos(a), Math.sin(a)));
+      dn.push(this.duneNoise(Math.cos(a), Math.sin(a)));
+    }
+    cn.sort((a, b) => a - b);
+    dn.sort((a, b) => a - b);
+    const q = (arr: number[], f: number): number => arr[clamp(Math.floor(f * arr.length), 0, arr.length - 1)]!;
+    const half = COAST.blend / 2;
+    this.cliffRange = [q(cn, 1 - COAST.cliffShare - half), q(cn, 1 - COAST.cliffShare + half)];
+    // Dunes are cut where there are cliffs, so ask the noise for a bit more.
+    const dShare = COAST.duneShare / (1 - COAST.cliffShare);
+    this.duneRange = [q(dn, 1 - dShare - half), q(dn, 1 - dShare + half)];
+  }
+
+  /**
+   * Coves go where the shore is cliffiest (sampled all round), spaced apart.
+   * Own RNG, so the rest of the generation is unaffected.
+   */
+  private placeCoves(): void {
+    const rand = mulberry32(this.cfg.seed + 555);
+    const count = this.cfg.size <= 192 ? 1 : this.cfg.size <= 384 ? 2 : 3;
+    const candidates: Array<{ a: number; score: number }> = [];
+    for (let k = 0; k < 72; k++) {
+      const a = (k / 72) * Math.PI * 2;
+      candidates.push({ a, score: this.cliffNoise(Math.cos(a), Math.sin(a)) + rand() * 0.15 });
+    }
+    candidates.sort((p, q) => q.score - p.score);
+    for (const cand of candidates) {
+      if (this.coves.length >= count) break;
+      if (this.coves.some((cv) => Math.abs(angleDiff(cv.a, cand.a)) < 0.9)) continue;
+      const depth = clamp(this.radius * 0.13, COAST.coveDepthMin, COAST.coveDepthMax) * (0.8 + rand() * 0.4);
+      this.coves.push({ a: cand.a, aw: (depth * COAST.coveWidth) / this.radius, depth });
+    }
   }
 
   /**
@@ -218,35 +322,65 @@ class IslandShape {
     return BIOME.forest;
   }
 
-  /** Coastline radius and beach width for a direction. Sampled on a circle so it is seamless. */
-  coastAt(angle: number): { coast: number; beach: number } {
+  /** Coastline radius, beach width and coast type for a direction. Sampled on a circle so it is seamless. */
+  coastAt(angle: number): CoastProfile {
     const c = Math.cos(angle), s = Math.sin(angle);
     const n = this.coastNoise.fbm(c * 1.6 + 31, s * 1.6 - 17, 3); // ≈ −0.8..0.8
     const b = this.coastNoise.noise2(c * 2.2 + 80, s * 2.2 + 80);
-    return { coast: this.radius * (1 + ISLAND.wobble * n), beach: this.beach * (0.85 + 0.3 * (b + 0.5)) };
+    let coast = this.radius * (1 + ISLAND.wobble * n);
+    let beach = this.beach * (0.85 + 0.3 * (b + 0.5));
+    if (this.gen < 3) return { coast, beach, cliff: 0, dune: 0, cliffH: 0 };
+
+    let cliff = smoothstep(this.cliffRange[0], this.cliffRange[1], this.cliffNoise(c, s));
+    let dune = smoothstep(this.duneRange[0], this.duneRange[1], this.duneNoise(c, s)) * (1 - cliff);
+    let cove = 0;
+    for (const cv of this.coves) {
+      const t = angleDiff(angle, cv.a) / cv.aw;
+      if (Math.abs(t) >= 1) continue;
+      const bump = Math.cos((t * Math.PI) / 2) ** 2;
+      coast -= cv.depth * bump;
+      cove = Math.max(cove, bump);
+    }
+    // In a cove: a small beach at the back, cliffs only on its sides.
+    cliff *= 1 - smoothstep(0.2, 0.75, cove);
+    dune *= 1 - cove;
+    beach *= 1 + (COAST.duneWiden - 1) * dune;
+    beach *= 1 - 0.4 * cove;
+    beach = lerp(beach, 1.2, cliff);
+    const cliffH = lerp(COAST.cliffMin, COAST.cliffMax, clamp(this.coastKind.noise2(c * 3 + 70, s * 3) + 0.5, 0, 1));
+    return { coast, beach, cliff, dune, cliffH };
   }
 
-  /** Metres inland from the waterline (negative = out at sea) and the local beach width. */
-  zone(x: number, z: number): { d: number; beach: number } {
-    const { coast, beach } = this.coastAt(Math.atan2(z, x));
-    return { d: coast - Math.hypot(x, z), beach };
+  /** Metres inland from the waterline (negative = out at sea), the local beach width and coast type. */
+  zone(x: number, z: number): CoastProfile & { d: number } {
+    const p = this.coastAt(Math.atan2(z, x));
+    return { ...p, d: p.coast - Math.hypot(x, z) };
   }
 
   height(x: number, z: number): number {
     const W = this.cfg.waterLevel;
-    const { d, beach } = this.zone(x, z);
+    const { d, beach, cliff, dune, cliffH } = this.zone(x, z);
     let h: number;
     if (d < 0) {
-      // Sea: a gentle lagoon shelf, then the floor drops to seaDepth.
+      // Sea: a gentle lagoon shelf, then the floor drops to seaDepth. At the
+      // foot of a cliff there is hardly any shelf: deep water right away.
       const s = -d;
-      h = s <= ISLAND.lagoon
-        ? W + 0.25 - s * 0.07
-        : W + 0.25 - ISLAND.lagoon * 0.07 - (s - ISLAND.lagoon) * 0.3;
+      const lagoon = lerp(ISLAND.lagoon, 1.5, cliff), top = W + 0.25 - cliff * 0.9, drop = lerp(0.3, 0.9, cliff);
+      h = s <= lagoon
+        ? top - s * 0.07
+        : top - lagoon * 0.07 - (s - lagoon) * drop;
       h = Math.max(h, W - ISLAND.seaDepth);
     } else if (d < beach) {
       // Beach: rises only 0.45 m over its whole width — flat enough to build anywhere.
       const t = d / beach;
       h = W + 0.25 + 0.45 * t * Math.sqrt(t) + this.hills.noise2(x / 9, z / 9) * 0.04;
+      if (dune > 0) {
+        // Dunes: wavy sand ridges along the back of the beach, flat by the sea.
+        const bell = smoothstep(0.2, 0.45, t) * (1 - smoothstep(0.82, 1, t));
+        const n = this.coastKind.fbm(x / 14, z / 14, 2);
+        const ridge = 0.5 + 0.5 * Math.sin(d * 0.55 + n * 4);
+        h += dune * bell * COAST.duneHeight * (0.25 + 0.75 * ridge * ridge) * (0.75 + 0.5 * (n + 0.5));
+      }
     } else {
       // Forest: low, broad hills that fade in from the beach edge.
       const f = this.cfg.baseFrequency;
@@ -255,6 +389,15 @@ class IslandShape {
       const outcrop = Math.max(0, this.hills.ridged(x * f * 2.6 + 40, z * f * 2.6 - 17, 3) - 0.58) * 3;
       h = W + 0.7 + inland * (0.6 + hills * this.cfg.maxHeight + outcrop);
       if (this.gen >= 2) h += this.mountain(x, z) * this.inlandFade(d, beach);
+    }
+    if (cliff > 0 && d > -1) {
+      // Cliffs: a steep, jagged rock face right at the waterline up to a
+      // plateau that slopes back down to the hills inland.
+      const face = smoothstep(0.2, 3.8, d);
+      const plateau = 1 - smoothstep(18, 52, d);
+      const jag = this.crags.ridged(x / 7, z / 7, 3) * 1.4 * face * (1 - face * 0.6);
+      const top = W + 0.4 + cliffH * face * plateau + jag;
+      h = lerp(h, Math.max(h, top), cliff);
     }
     // Caves: carve the chamber floor flat into the mountainside, and keep the
     // ground in front of the mouth no higher than the floor.
@@ -289,7 +432,13 @@ export function generateTerrain(cfg: TerrainConfig = DEFAULT_TERRAIN): TerrainDa
   const rand = mulberry32(cfg.seed + 7);
 
   // ---- Spawn on the beach, and ponds inland away from it --------------------
-  const spawnAngle = rand() * Math.PI * 2;
+  let spawnAngle = rand() * Math.PI * 2;
+  // Gen 3: wash up on a flat beach, not at the foot of a cliff or on a dune.
+  const badSpawn = (a: number): boolean => {
+    const p = island.coastAt(a);
+    return p.cliff > 0.1 || p.dune > 0.2;
+  };
+  for (let tries = 0; island.gen >= 3 && tries < 48 && badSpawn(spawnAngle); tries++) spawnAngle += 0.31;
   const sc = island.coastAt(spawnAngle);
   const sr = sc.coast - sc.beach * 0.5;
   const sx = Math.cos(spawnAngle) * sr, sz = Math.sin(spawnAngle) * sr;
@@ -396,6 +545,12 @@ function placeMountainsAndCaves(island: IslandShape, _rand: () => number): void 
     }
     if (best) island.caves.push(best.c);
   }
+}
+
+/** The coast profile at `samples` evenly spaced angles around the island (tests, tuning). */
+export function coastProfiles(cfg: TerrainConfig, samples = 360): CoastProfile[] {
+  const island = new IslandShape(cfg);
+  return Array.from({ length: samples }, (_, k) => island.coastAt((k / samples) * Math.PI * 2));
 }
 
 /** Bilinear height sample at world (x, z). Used by AI ground-snapping and spawning. */
@@ -701,6 +856,14 @@ function scatterExtras(
     const clearing = (noise.fbm(x / 28, z / 28, 2) + 1) / 2 < 0.3;
     if (rand() < (clearing ? 0.12 : 0.02) && sampleHeight(t, x, z) > W + 0.4 && free(x, z, 0.3, 0.2)) add('rare_flower', x, z, 0.8 + rand() * 0.5);
   });
+}
+
+/** Signed smallest difference between two angles, in (−π, π]. */
+function angleDiff(a: number, b: number): number {
+  let d = (a - b) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d <= -Math.PI) d += Math.PI * 2;
+  return d;
 }
 
 function lerp(a: number, b: number, t: number): number {

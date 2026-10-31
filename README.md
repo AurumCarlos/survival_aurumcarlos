@@ -13,8 +13,17 @@ npm run typecheck:core  # proves the simulation layer has no Three/Cannon import
 ```
 
 Controls use physical key positions (`KeyboardEvent.code`), so **WASD lands on ZQSD on AZERTY**.
-Shift sprint · C crouch · Space jump · hold E harvest · I/Tab inventory · 1–6 hotbar ·
+Shift sprint · C crouch · Space jump · hold E harvest · I/Tab inventory · 1–6 or mouse wheel hotbar ·
 LMB swing · RMB throw spear · B build mode (R/wheel piece, LMB place, X demolish) · E door · Esc or P pause.
+
+**Settings** (main menu or pause menu): graphics (quality, resolution, target FPS, number of detailed trees,
+draw distance, FPS counter) and simulation (day length, temperature, hunger/thirst/tiredness, regeneration,
+movement, harvest yield, regrowth, animals and breeding). Definitions live in `src/data/settings.ts`; values
+are saved in the browser and apply immediately.
+
+**Weather & sound**: rain falls in streaks under grey, cloudy skies (clouds drift on fine days too); the sun,
+the moon (with phases) and stars light the sky. All sound is synthesised in `src/audio/SoundEngine.ts` (no
+audio files): waves near the sea, wind, rain, birds by day, crickets at night, footsteps by ground type, hits.
 
 ## Folder architecture
 

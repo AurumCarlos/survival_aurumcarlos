@@ -288,11 +288,15 @@ function terrainLayers(L: Float32Array, tint: THREE.Color, h: number, slope: num
   const r2 = Math.abs((Math.sin(seed * 7.13) * 9871.3) % 1);
   const above = h - water;
   // Sand everywhere near and under the sea; it fades into the biome above.
-  const beach = biome === 6 ? 0 : 1 - sstep(0.55, 0.95, above);
+  // Beach biome (incl. gen 3 dunes, which rise well above the usual beach
+  // height) stays sand; only the dune crests get a little beach grass.
+  // Steep beach-biome ground is the foot of a gen 3 cliff: rock, not sand.
+  const beach = biome === 6 ? 0 : biome === 0 ? (1 - sstep(1.6, 2.8, above) * 0.35) * (1 - sstep(0.22, 0.38, slope)) : 1 - sstep(0.55, 0.95, above);
   const rock = Math.max(sstep(0.22, 0.38, slope), biome === 4 ? 0.2 + r2 * 0.25 : 0);
   let snow = 0, grass = 0, dirt = 0;
   switch (biome) {
     case 6: dirt = 1; tint.copy(TINT.cave); break;
+    case 0: grass = 1; tint.copy(TINT.dry); break; // beach grass on dune crests
     case 5: snow = 1; break;
     case 4: grass = 0.75; dirt = 0.25; tint.copy(TINT.highland); break;
     case 3: grass = 1; tint.copy(TINT.meadow).lerp(TINT.dry, r2 * 0.5); break;

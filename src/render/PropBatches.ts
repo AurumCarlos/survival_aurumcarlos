@@ -13,7 +13,8 @@ import { firLowGeometry, flatMaterial, propGeometry } from './LowPolyFactory';
  * on a laptop.
  *
  * Per-instance work is done here instead of per mesh: distance culling (fog),
- * hiding small props far away, tree LOD switching and hiding felled trees.
+ * hiding small props far away, detailed meshes for the N nearest trees only,
+ * and hiding felled trees.
  * Three does the per-instance frustum culling.
  */
 
@@ -163,16 +164,27 @@ export class PropBatches {
     if (p) p.depleted = depleted;
   }
 
+  /** Scratch for update(): indices of the nearest trees, sorted by distance. */
+  private readonly nearest: number[] = [];
+  private readonly nearestD2: number[] = [];
+
   /**
    * Applies distance culling and LOD for a camera at (x, z): props past
-   * `d.view` are hidden, small ones past `d.smallProps`, and trees past
-   * `d.treeLod` use the low LOD. Cheap: only changed instances are touched.
+   * `d.view` are hidden, small ones past `d.smallProps`, and only the
+   * `d.detailedTrees` nearest visible trees use the detailed mesh — every
+   * other tree, however close, uses the low LOD. That caps the cost of
+   * dense forest at a fixed number of detailed trees. Cheap: only changed
+   * instances are touched.
    */
-  update(x: number, z: number, d: { view: number; treeLod: number; smallProps: number }): void {
+  update(x: number, z: number, d: { view: number; detailedTrees: number; smallProps: number }): void {
     const view2 = d.view * d.view;
     const small2 = d.smallProps * d.smallProps;
-    const lod2 = d.treeLod * d.treeLod;
-    for (const p of this.props) {
+    const keep = Math.max(0, d.detailedTrees);
+    const near = this.nearest, nearD2 = this.nearestD2;
+    near.length = 0;
+    nearD2.length = 0;
+    for (let i = 0; i < this.props.length; i++) {
+      const p = this.props[i]!;
       const dx = p.x - x, dz = p.z - z, d2 = dx * dx + dz * dz;
       const shown = !p.depleted && d2 < (p.small ? small2 : view2);
       if (shown !== p.shown) {
@@ -180,14 +192,27 @@ export class PropBatches {
         if (p.solidId >= 0) this.solid.setVisibleAt(p.solidId, shown);
         if (p.leafId >= 0) this.leaves.setVisibleAt(p.leafId, shown);
       }
-      if (!shown || !p.variant.low) continue;
-      const low = d2 > lod2;
-      if (low !== p.low) {
-        p.low = low;
-        const parts = low ? p.variant.low : p.variant.high;
-        if (p.solidId >= 0) this.solid.setGeometryIdAt(p.solidId, parts.solid);
-        if (p.leafId >= 0) this.leaves.setGeometryIdAt(p.leafId, parts.leaf);
+      if (!shown || !p.variant.low || keep === 0) continue;
+      // Insert into the sorted list of the `keep` nearest trees.
+      if (near.length === keep && d2 >= nearD2[keep - 1]!) continue;
+      let j = Math.min(near.length, keep - 1);
+      while (j > 0 && nearD2[j - 1]! > d2) {
+        near[j] = near[j - 1]!;
+        nearD2[j] = nearD2[j - 1]!;
+        j--;
       }
+      near[j] = i;
+      nearD2[j] = d2;
+    }
+    for (let i = 0; i < this.props.length; i++) {
+      const p = this.props[i]!;
+      if (!p.variant.low) continue;
+      const low = !near.includes(i);
+      if (low === p.low) continue;
+      p.low = low;
+      const parts = low ? p.variant.low : p.variant.high;
+      if (p.solidId >= 0) this.solid.setGeometryIdAt(p.solidId, parts.solid);
+      if (p.leafId >= 0) this.leaves.setGeometryIdAt(p.leafId, parts.leaf);
     }
   }
 

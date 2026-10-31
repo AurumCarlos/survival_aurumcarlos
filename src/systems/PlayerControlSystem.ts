@@ -1,6 +1,7 @@
 import type { System, World } from '../core/ecs/World';
 import type { InputManager } from '../core/Input';
 import { PlayerControlled, SurvivorC } from '../components';
+import { SIM } from '../data/settings';
 
 export const MOVEMENT = {
   walkSpeed: 4.2,
@@ -51,7 +52,7 @@ export class PlayerControlSystem implements System {
       }
 
       const base = swim ? MOVEMENT.swimSpeed : sprint ? MOVEMENT.sprintSpeed : crouch ? MOVEMENT.crouchSpeed : MOVEMENT.walkSpeed;
-      const speed = base * s.modifiers.moveSpeed;
+      const speed = base * s.modifiers.moveSpeed * SIM.moveSpeed;
       // Normalise so diagonals are not √2 faster, then rotate into world space by yaw.
       const len = Math.hypot(this.axis.x, this.axis.y) || 1;
       const ix = this.axis.x / len, iz = this.axis.y / len;

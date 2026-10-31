@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { AssetLoader } from '../assets/AssetLoader';
+import type { AudioWorldState, SoundEngine } from '../audio/SoundEngine';
 import { Creature, HeatSource, PlayerControlled, ResourceC, Structure, SurvivorC, Transform } from '../components';
 import { World, type Entity } from '../core/ecs/World';
 import { EventBus } from '../core/EventBus';
@@ -32,12 +33,12 @@ import { AILodSystem } from '../systems/ai/AILodSystem';
 import { AISystem } from '../systems/ai/AISystem';
 import { ApexSystem } from '../systems/ai/ApexSystem';
 import { BreedingSystem } from '../systems/ai/BreedingSystem';
-import { creatureBudget } from '../world/MapConfig';
 import { ApexAnimation } from '../render/ApexAnimation';
 import { FlowFieldService } from '../systems/ai/nav/FlowFieldService';
 import { NoiseBus } from '../systems/ai/NoiseBus';
 import { PerceptionSystem } from '../systems/ai/PerceptionSystem';
 import { DayNightCycle, DEFAULT_DAY_NIGHT } from '../systems/DayNightCycle';
+import { SIM } from '../data/settings';
 import { EnvironmentSystem } from '../systems/EnvironmentSystem';
 import { InteractionSystem } from '../systems/InteractionSystem';
 import { CraftingSystem } from '../systems/inventory/CraftingSystem';
@@ -54,7 +55,7 @@ import { HUD } from '../ui/HUD';
 import { InventoryUI } from '../ui/InventoryUI';
 import type { MapConfig } from '../world/MapConfig';
 import type { TerrainBundle } from '../world/TerrainCodec';
-import { insideCave, sampleHeight } from '../world/TerrainGenerator';
+import { insideCave, sampleHeight, sampleSlope, type TerrainData } from '../world/TerrainGenerator';
 import { populateResources, spawnApexPredators, spawnInitialCreatures, type PopulatedWorld } from '../world/WorldPopulator';
 
 const BABY_NAME: Record<string, string> = { deer: 'deer (fawn)', boar: 'boar (piglet)', wolf: 'wolf (pup)' };
@@ -72,6 +73,8 @@ export interface SessionDeps {
   onProgress?: (fraction: number, label: string) => void;
   /** Called at the start of every rendered frame (App-level hotkeys, autosave). */
   onFrame?: (s: GameSession, dt: number) => void;
+  /** Procedural sound (ambience follows the player; game events play effects). */
+  sound?: SoundEngine;
 }
 
 /**
@@ -135,6 +138,7 @@ export class GameSession {
     const { world, events } = this;
     const terrain = d.bundle.terrain;
     this.cycle = new DayNightCycle({ ...DEFAULT_DAY_NIGHT, seed: d.map.seed });
+    this.applySimSettings();
     // Remove the Three object of any destroyed entity (e.g. emptied carcasses).
     world.onDestroy((e) => world.get(e, RenderObject)?.object.removeFromParent());
 
@@ -202,6 +206,7 @@ export class GameSession {
       return !!b?.active || this.building.lookingAt !== null;
     });
     this.interaction.blocked = () => this.structures.focused !== null;
+    this.interaction.wheelBlocked = () => !!world.get(this.player, BuilderC)?.active;
     events.on('structure:open', ({ entity }) => (this.openRequest = entity));
     // Respawn: remember the bed you last used; on death, leave your things where you fell.
     events.on('player:sleep-request', ({ bed }) => (this.lastBed = bed));
@@ -262,7 +267,7 @@ export class GameSession {
         waterLevel: terrain.cfg.waterLevel, paths: this.paths, isNight: () => this.cycle.isNight,
         survival: survival.manager, events, half: terrain.cfg.size / 2,
       }))
-      .addSystem(new BreedingSystem(events, creatureBudget(d.map), (x, z) => this.populated.nav.isWalkable(x, z), (x, z) => sampleHeight(terrain, x, z)))
+      .addSystem(new BreedingSystem(events, (x, z) => this.populated.nav.isWalkable(x, z), (x, z) => sampleHeight(terrain, x, z)))
       .addSystem(this.crafting)
       .addSystem(survival);
     events.on('creature:born', ({ entity, species }) => {
@@ -276,7 +281,8 @@ export class GameSession {
     // Beds: E on a bed at night fast-forwards to morning through these systems.
     new SleepSystem(world, events, this.cycle, [this.stations, environment, this.interaction, this.crafting, survival]);
 
-    this.hud = new HUD(d.uiContainer, events, this.cycle, survival.manager);
+    this.hud = new HUD(d.uiContainer, events, this.cycle, survival.manager, () => d.renderer.resolutionScale);
+    this.hookSounds();
     this.inventory = new InventoryUI(
       d.uiContainer, world, () => this.player, this.crafting, survival.manager, events, (kind) => this.placeStructure(kind),
       this.stations, (e) => this.pickUpStructure(e),
@@ -333,6 +339,17 @@ export class GameSession {
   }
 
   // ---- Public API used by App ----------------------------------------------
+
+  /**
+   * Pushes the simulation settings that live in this session's own objects
+   * (the day/night cycle). Everything else reads SIM directly every tick.
+   */
+  applySimSettings(): void {
+    const cfg = this.cycle.cfg;
+    cfg.dayLengthSeconds = SIM.dayLengthMinutes * 60;
+    cfg.meanTempC = SIM.meanTempC;
+    cfg.amplitudeC = SIM.tempSwingC;
+  }
 
   get isInventoryOpen(): boolean {
     return this.inventory.isOpen;
@@ -403,6 +420,7 @@ export class GameSession {
     if (this.disposed) return;
     this.d.onFrame?.(this, dt);
     this.animateFires(dt);
+    if (this.d.sound && !this.loop.isPaused) this.d.sound.update(dt, this.audioState(dt));
     this.inventory.frame();
     const prompt = this.building.prompt() ?? this.structures.prompt(this.world) ?? this.hud.promptFor(this.world, this.interaction.focused, this.player);
     this.hud.update(this.world, this.player, dt, this.loop, prompt, this.crafting.progress(this.player));
@@ -446,6 +464,71 @@ export class GameSession {
     return null;
   }
 
+  // ---- Sound ------------------------------------------------------------------
+
+  private waterDistance = 60;
+  private waterCheck = 0;
+
+  private hookSounds(): void {
+    const sound = this.d.sound;
+    if (!sound) return;
+    const { events, world } = this;
+    const nearPlayer = (e: Entity, r: number): boolean => {
+      const p = world.get(e, Transform)?.position, pp = world.require(this.player, Transform).position;
+      return !!p && Math.hypot(p.x - pp.x, p.z - pp.z) < r;
+    };
+    events.on('player:action-impact', ({ action }) => (action === 'harvest' ? sound.hit(false) : sound.swing()));
+    events.on('creature:hit', () => sound.hit(true));
+    events.on('player:damaged', () => sound.hurt());
+    events.on('crafting:completed', () => sound.chime());
+    events.on('resource:depleted', ({ entity }) => {
+      if (world.get(entity, ResourceC)?.kind === 'tree' && nearPlayer(entity, 40)) sound.treeFall();
+    });
+  }
+
+  /** What the ambience needs to know about where the player is. */
+  private audioState(dt: number): AudioWorldState {
+    const terrain = this.d.bundle.terrain;
+    const W = terrain.cfg.waterLevel;
+    const feet = this.world.require(this.player, Transform).position;
+    const pc = this.world.require(this.player, PlayerControlled);
+    // Distance to water: rings of samples, a few times a second.
+    if ((this.waterCheck -= dt) <= 0) {
+      this.waterCheck = 0.3;
+      this.waterDistance = 60;
+      search: for (const r of [0, 5, 10, 16, 24, 34, 46, 60]) {
+        for (let k = 0; k < 12; k++) {
+          const a = (k / 12) * Math.PI * 2;
+          if (sampleHeight(terrain, feet.x + Math.cos(a) * r, feet.z + Math.sin(a) * r) < W - 0.1) {
+            this.waterDistance = r;
+            break search;
+          }
+        }
+      }
+    }
+    const caves = terrain.caves ?? [];
+    const inCave = caves.some((c) => insideCave(c, feet.x, feet.z) && feet.y < c.y + c.height);
+    const top = this.buildings.foundationTopAt(feet.x, feet.z);
+    const ground = sampleHeight(terrain, feet.x, feet.z);
+    const onFloor = top !== null && Math.abs(feet.y - top) < 0.3;
+    let kind: AudioWorldState['ground'] = 'grass';
+    if (onFloor) kind = 'wood';
+    else if (inCave || sampleSlope(terrain, feet.x, feet.z) > 0.3 || ground > W + 18) kind = 'rock';
+    else if (ground < W + 1.2 || (terrain.biomes && terrain.biomes[biomeIndex(terrain, feet.x, feet.z)] === 0)) kind = 'sand';
+    const body = this.world.get(this.player, PhysicsBody)?.body;
+    return {
+      waterDistance: this.waterDistance,
+      altitude: Math.max(0, feet.y - W),
+      light: this.cycle.lightLevel,
+      rain: this.cycle.rainIntensity,
+      sheltered: inCave || this.buildings.shelterAt(feet).roof,
+      speed: body ? Math.hypot(body.velocity.x, body.velocity.z) : 0,
+      grounded: pc.grounded,
+      swimming: pc.swimming,
+      ground: kind,
+    };
+  }
+
   private animateFires(dt: number): void {
     this.fireTime += dt;
     for (const e of this.world.query(HeatSource, RenderObject)) {
@@ -461,4 +544,13 @@ export class GameSession {
       if (light) light.intensity = h.lit ? 6 * flicker : 0;
     }
   }
+}
+
+/** Index of the height/biome vertex nearest (x, z). */
+function biomeIndex(t: TerrainData, x: number, z: number): number {
+  const { size, resolution } = t.cfg;
+  const n = resolution + 1;
+  const ix = Math.min(resolution, Math.max(0, Math.round(((x + size / 2) / size) * resolution)));
+  const iz = Math.min(resolution, Math.max(0, Math.round(((z + size / 2) / size) * resolution)));
+  return iz * n + ix;
 }

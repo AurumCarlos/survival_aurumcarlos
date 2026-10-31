@@ -1,6 +1,7 @@
 import type { Entity, System, World } from '../../core/ecs/World';
 import type { EventBus } from '../../core/EventBus';
-import { AIBrain, Creature, Transform, type CreatureSpecies } from '../../components';
+import { AIBrain, Creature, Transform, type Blackboard, type CreatureSpecies } from '../../components';
+import { SIM } from '../../data/settings';
 import type { Vec3 } from '../../data/schema';
 import { spawnCreature, speciesStats } from '../../entities/factories';
 
@@ -12,14 +13,6 @@ export const BREEDING: Readonly<Partial<Record<CreatureSpecies, { growSeconds: n
 };
 
 export const BREED_TUNING = {
-  /** Seconds between breeding checks (per species). */
-  interval: 45,
-  /** Chance a species with a pair of adults has young at a check. */
-  chance: 0.4,
-  /** Two adults of the same species within this distance make a pair. */
-  pairDistance: 30,
-  /** Population never grows past cap × the starting population. */
-  capFactor: 1.4,
   /** A newborn's size/strength (0..1). */
   birthGrowth: 0.2,
   /** Young predators don't attack (they flee) until they reach this. */
@@ -27,11 +20,17 @@ export const BREED_TUNING = {
 } as const;
 
 /**
- * Animals repopulate the island: where there are at least two adults of a
- * species close together (and the population is below its cap), babies are
- * born next to the mother. They start small, weak and timid, and grow little
- * by little into adults (size, health, speed, and for wolves the will to
- * attack). An extinct species — or one down to a single adult — never comes back.
+ * Animals repopulate the island the way real ones do. Every animal is male
+ * or female (fixed the first time it is seen, saved with it). An adult
+ * female who is not pregnant or resting mates with an adult male of her
+ * species standing close to her (SIM.mateDistance), with some chance at
+ * each check; a male who is near but not close enough (SIM.courtDistance)
+ * starts following her (he takes her patrol route) until they meet. After a
+ * gestation the mother gives birth next to her and then rests before she
+ * can mate again. Babies grow little by little into adults (size, health,
+ * speed, and for wolves the will to attack). There is no population cap
+ * unless the player sets one (SIM.maxAnimals): hunting keeps numbers down. An extinct species, or one with no pair left,
+ * never comes back. All timings come from the simulation settings (SIM).
  */
 export class BreedingSystem implements System {
   readonly name = 'breeding';
@@ -39,48 +38,94 @@ export class BreedingSystem implements System {
 
   constructor(
     private readonly events: EventBus,
-    /** Starting population per species (cap = capFactor × this). */
-    private readonly startCount: Readonly<Partial<Record<CreatureSpecies, number>>>,
     private readonly isWalkable: (x: number, z: number) => boolean,
     private readonly groundHeight: (x: number, z: number) => number,
     private readonly rng: () => number = Math.random,
   ) {}
 
   fixedUpdate(world: World, dt: number): void {
-    // Growing up, every tick.
     for (const e of world.query(Creature, AIBrain)) {
       const c = world.require(e, Creature);
-      if (c.growth === undefined || c.health <= 0) continue;
+      if (c.health <= 0) continue;
       const spec = BREEDING[c.species];
-      c.growth = Math.min(1, c.growth + dt / (spec?.growSeconds ?? 600));
-      applyGrowth(world, e);
+      // Growing up, every tick.
+      if (c.growth !== undefined) {
+        c.growth = Math.min(1, c.growth + dt / ((spec?.growSeconds ?? 600) * SIM.growTime));
+        applyGrowth(world, e);
+      }
+      // Pregnancy and rest.
+      const b = world.require(e, AIBrain).blackboard.breed;
+      if (!b) continue;
+      if (b.rest !== undefined && (b.rest -= dt) <= 0) delete b.rest;
+      if (b.pregnant !== undefined && (b.pregnant -= dt) <= 0) {
+        delete b.pregnant;
+        this.giveBirth(world, e);
+      }
     }
 
     this.timer += dt;
-    if (this.timer < BREED_TUNING.interval) return;
+    if (this.timer < SIM.breedInterval) return;
     this.timer = 0;
-    for (const species of Object.keys(BREEDING) as CreatureSpecies[]) this.tryBreed(world, species);
+    if (SIM.maxAnimals > 0) {
+      // Optional limit (settings; 0 = none): a full island stops mating.
+      let n = 0;
+      for (const e of world.query(Creature)) {
+        const c = world.require(e, Creature);
+        if (c.health > 0 && BREEDING[c.species]) n++;
+      }
+      if (n >= SIM.maxAnimals) return;
+    }
+    for (const species of Object.keys(BREEDING) as CreatureSpecies[]) this.tryMate(world, species);
   }
 
-  private tryBreed(world: World, species: CreatureSpecies): void {
-    const all: Entity[] = [];
-    const adults: Entity[] = [];
+  private tryMate(world: World, species: CreatureSpecies): void {
+    const males: Entity[] = [];
+    const females: Entity[] = [];
     for (const e of world.query(Creature, AIBrain, Transform)) {
       const c = world.require(e, Creature);
-      if (c.species !== species || c.health <= 0) continue;
-      all.push(e);
-      if (c.growth === undefined) adults.push(e);
+      if (c.species !== species || c.health <= 0 || c.growth !== undefined) continue; // adults only
+      (breedState(world, e).sex === 'male' ? males : females).push(e);
     }
-    const cap = Math.round((this.startCount[species] ?? 0) * BREED_TUNING.capFactor);
-    if (adults.length < 2 || all.length >= cap || this.rng() > BREED_TUNING.chance) return;
-    // A mother with a mate nearby.
     const pos = (e: Entity): Vec3 => world.require(e, Transform).position;
-    const mothers = adults.filter((a) => adults.some((b) => b !== a && Math.hypot(pos(a).x - pos(b).x, pos(a).z - pos(b).z) < BREED_TUNING.pairDistance));
-    if (mothers.length === 0) return;
-    const mother = mothers[Math.floor(this.rng() * mothers.length)]!;
-    const spec = BREEDING[species]!;
-    const n = Math.min(cap - all.length, spec.litter[0] + Math.floor(this.rng() * (spec.litter[1] - spec.litter[0] + 1)));
-    for (let i = 0; i < n; i++) this.birth(world, species, mother);
+    const courting = new Set<Entity>();
+    for (const f of females) {
+      const fb = breedState(world, f);
+      if (fb.pregnant !== undefined || fb.rest !== undefined) continue;
+      // Her nearest free male.
+      let best: Entity | null = null, bestD = Infinity;
+      for (const m of males) {
+        if (courting.has(m)) continue;
+        const d = Math.hypot(pos(m).x - pos(f).x, pos(m).z - pos(f).z);
+        if (d < bestD) { bestD = d; best = m; }
+      }
+      if (best === null) continue;
+      if (bestD <= SIM.mateDistance) {
+        if (this.rng() < SIM.breedChance) {
+          fb.pregnant = SIM.gestationSeconds;
+          courting.add(best);
+          if (fb.pregnant <= 0) {
+            delete fb.pregnant;
+            this.giveBirth(world, f);
+          }
+        }
+      } else if (bestD <= SIM.courtDistance) {
+        // Courtship: he follows her patrol route until they are close.
+        const mbb = world.require(best, AIBrain).blackboard, fbb = world.require(f, AIBrain).blackboard;
+        mbb.home = { ...fbb.home };
+        mbb.waypoints = fbb.waypoints.map((w) => ({ ...w }));
+        mbb.waypointIndex = fbb.waypointIndex;
+        courting.add(best);
+      }
+    }
+  }
+
+  private giveBirth(world: World, mother: Entity): void {
+    const c = world.require(mother, Creature);
+    const spec = BREEDING[c.species];
+    if (!spec || c.health <= 0) return;
+    const n = spec.litter[0] + Math.floor(this.rng() * (spec.litter[1] - spec.litter[0] + 1));
+    for (let i = 0; i < n; i++) this.birth(world, c.species, mother);
+    breedState(world, mother).rest = SIM.breedCooldownSeconds;
   }
 
   private birth(world: World, species: CreatureSpecies, mother: Entity): void {
@@ -107,6 +152,12 @@ export class BreedingSystem implements System {
     c.health = c.maxHealth;
     this.events.emit('creature:born', { entity: baby, species });
   }
+}
+
+/** An animal's breeding record, created (with its sex, from its own random seed) the first time it is needed. */
+export function breedState(world: World, e: Entity): NonNullable<Blackboard['breed']> {
+  const bb = world.require(e, AIBrain).blackboard;
+  return (bb.breed ??= { sex: bb.rngState % 2 === 0 ? 'female' : 'male' });
 }
 
 /**

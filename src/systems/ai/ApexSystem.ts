@@ -4,6 +4,7 @@ import {
   AIBrain, Creature, PlayerControlled, SurvivorC, Transform, type ApexMode, type ApexState,
 } from '../../components';
 import { itemDef } from '../../data/items';
+import { SIM } from '../../data/settings';
 import type { Vec3 } from '../../data/schema';
 import { insideCave, type Cave } from '../../world/TerrainGenerator';
 import type { SurvivalStatusManager } from '../SurvivalStatusManager';
@@ -25,6 +26,9 @@ export interface ApexServices {
 }
 
 /** Crocodile tuning. */
+/** Angle (rad) between successive crocodile patrol points: short hops hug the coast instead of cutting across headlands. */
+const PATROL_STEP = 0.2;
+
 export const CROC = {
   /** Float height: Transform.y = water − this, so only eyes, nostrils and back ridges break the surface. */
   floatDepth: 0.55,
@@ -74,6 +78,8 @@ export class ApexSystem implements System {
   private readonly stuck = new Map<Entity, { x: number; z: number; t: number }>();
   /** Crocodile going round a sandbank: which side, for how much longer, which way. */
   private readonly detour = new Map<Entity, { side: number; t: number; heading: number }>();
+  /** Patrol points reached per crocodile: every third one it floats still for a moment. */
+  private readonly hops = new Map<Entity, number>();
 
   constructor(private readonly s: ApexServices) {}
 
@@ -147,7 +153,7 @@ export class ApexSystem implements System {
         }
         if (a.mode === 'lurk') {
           if (a.t > 2 + (e % 3)) {
-            a.angle += 0.35 + ((e * 0.137) % 0.3);
+            a.angle += PATROL_STEP + ((e * 0.137) % 0.15);
             a.target = this.patrolPoint(a.angle, e);
             set('swim');
           }
@@ -157,9 +163,11 @@ export class ApexSystem implements System {
         const left = this.moveTo(k, p, a.target.x, a.target.z, CROC.swimSpeed, 1.6, dt, true);
         if (left < 2.5) {
           // Mostly keeps cruising along the shore; now and then floats still for a moment.
-          a.angle += 0.35 + ((e * 0.137) % 0.3);
+          a.angle += PATROL_STEP + ((e * 0.137) % 0.15);
           a.target = this.patrolPoint(a.angle, e);
-          if ((Math.floor(a.angle * 10) + e) % 3 === 0) set('lurk');
+          const hops = (this.hops.get(e) ?? e) + 1;
+          this.hops.set(e, hops);
+          if (hops % 3 === 0) set('lurk');
         } else if (this.isStuck(p, dt, 2.5, true)) {
           // Wedged against a sandbank: pick a point further along and further out.
           a.angle += 0.7;
@@ -242,19 +250,25 @@ export class ApexSystem implements System {
     p.y += (targetY - p.y) * Math.min(1, dt * 6);
   }
 
-  /** A point in the lagoon around the island, at the given angle. */
+  /**
+   * A point in the lagoon around the island, at the given angle. It lies
+   * past the outermost shore within ±0.25 rad, so the straight swim from one
+   * patrol point to the next goes round headlands instead of into a cove
+   * (where it used to get wedged and jitter).
+   */
   private patrolPoint(angle: number, seed: number): Vec3 {
     const W = this.s.waterLevel;
-    const cx = Math.cos(angle), cz = Math.sin(angle);
-    let first = -1;
-    for (let r = this.s.half * 0.2; r < this.s.half - 3; r += 1) {
-      if (this.s.terrainHeight(cx * r, cz * r) < W - 0.8) {
-        first = r;
-        break;
+    const firstWater = (a: number): number => {
+      const cx = Math.cos(a), cz = Math.sin(a);
+      for (let r = this.s.half * 0.2; r < this.s.half - 3; r += 1) {
+        if (this.s.terrainHeight(cx * r, cz * r) < W - 0.8) return r;
       }
-    }
+      return -1;
+    };
+    let first = -1;
+    for (let k = -2; k <= 2; k++) first = Math.max(first, firstWater(angle + k * 0.125));
     const r = first < 0 ? this.s.half * 0.85 : Math.min(this.s.half - 3, first + 2 + ((seed * 7.31) % 4));
-    return { x: cx * r, y: W, z: cz * r };
+    return { x: Math.cos(angle) * r, y: W, z: Math.sin(angle) * r };
   }
 
   /** Nearest deep-enough water, searched outward from the island centre through (x, z). */
@@ -300,6 +314,19 @@ export class ApexSystem implements System {
     if (ok(nx, nz)) {
       p.x = nx;
       p.z = nz;
+    } else {
+      // Blocked while still turning: slide along the shore (on the side it
+      // is already going round) rather than freezing against it.
+      const side = this.detour.get(this.current)?.side ?? (wrapAngle(desired - k.heading) >= 0 ? 1 : -1);
+      for (const off of [0.5, 1, 1.5]) {
+        const h = k.heading + off * side;
+        const sx = p.x + Math.sin(h) * s * 0.6 * dt, sz = p.z + Math.cos(h) * s * 0.6 * dt;
+        if (ok(sx, sz)) {
+          p.x = sx;
+          p.z = sz;
+          break;
+        }
+      }
     }
     return dist;
   }
@@ -481,7 +508,7 @@ export class ApexSystem implements System {
   private hurtPlayer(world: World, player: Entity, k: Creature, bleedChance: number): void {
     const s = world.require(player, SurvivorC);
     const armor = s.equipped.body ? (itemDef(s.equipped.body.item).wearable?.armor ?? 0) : 0;
-    const dmg = k.attackDamage * (1 - armor);
+    const dmg = k.attackDamage * (1 - armor) * SIM.animalDamage;
     s.vitals.health = Math.max(0, s.vitals.health - dmg);
     if (Math.random() < bleedChance * (1 - armor)) this.s.survival.applyEffect(s, 'bleeding', 25, 'combat');
     this.s.events.emit('player:damaged', { entity: player, amount: dmg, source: k.species });

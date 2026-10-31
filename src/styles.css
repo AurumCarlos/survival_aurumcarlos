@@ -236,3 +236,32 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .rename input, .save-as input { flex: 1; min-width: 0; font: inherit; font-size: 14px; color: var(--ink); background: rgba(0,0,0,.3); border: 1px solid var(--line); border-radius: 5px; padding: 5px 8px; }
 .menu-card .rename button, .menu-card .save-as button { width: auto; margin: 0; padding: 5px 10px; font-size: 14px; }
 @media (max-width: 560px) { .save-row { flex-direction: column; align-items: stretch; } .save-acts { justify-content: flex-end; } }
+
+/* Settings page */
+.settings-card { width: min(620px, calc(100vw - 32px)); text-align: left; }
+.set-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.set-tabs button.on { background: #4f7a3f; border-color: #6a9a56; }
+.set-body { display: flex; flex-direction: column; gap: 10px; }
+.set-group { border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px 10px; margin: 0; }
+.set-group legend { padding: 0 6px; color: var(--ink-dim); font-size: 13px; }
+.set-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, 230px); align-items: center; gap: 12px; padding: 6px 0; font-size: 14px; }
+.set-row + .set-row { border-top: 1px solid rgba(255,255,255,.05); }
+.set-label small { display: block; font-size: 11px; color: var(--ink-dim); margin-top: 2px; }
+.set-ctl { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.set-ctl input[type=range] { flex: 1; min-width: 0; accent-color: #8fbf6f; }
+.set-ctl output { min-width: 58px; text-align: right; font-variant-numeric: tabular-nums; color: var(--ink); font-size: 13px; }
+.set-ctl select { font: inherit; font-size: 14px; color: var(--ink); background: rgba(0,0,0,.35); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; width: 100%; }
+.set-ctl input[type=checkbox] { width: 18px; height: 18px; accent-color: #8fbf6f; }
+.settings-card .actions { display: grid; grid-template-columns: 1fr 2fr; gap: 8px; }
+.hide-fps .fps { display: none; }
+@media (max-width: 520px) { .set-row { grid-template-columns: 1fr; } .set-ctl { justify-content: stretch; } }
+
+/* Compass (top centre, under the clock) */
+.compass { position: absolute; top: 52px; left: 50%; width: 264px; height: 22px; transform: translateX(-50%); overflow: hidden;
+  pointer-events: none; -webkit-mask-image: linear-gradient(90deg, transparent, #000 20%, #000 80%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 20%, #000 80%, transparent); }
+.compass-track { position: absolute; top: 0; left: 132px; height: 100%; will-change: transform; }
+.compass-track .cl { position: absolute; top: 2px; transform: translateX(-50%); font-size: 11px; color: var(--ink-dim); font-weight: 600; }
+.compass-track .cl.major { color: var(--ink); font-size: 13px; }
+.compass-track i { position: absolute; top: 8px; width: 1px; height: 6px; background: rgba(255,255,255,.35); }
+.compass-mark { position: absolute; left: 50%; top: 0; width: 2px; height: 5px; margin-left: -1px; background: #f0d060; }

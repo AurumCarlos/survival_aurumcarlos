@@ -4,6 +4,9 @@ import type { ViewportTarget } from '../core/Lifecycle';
 import type { DayNightCycle } from '../systems/DayNightCycle';
 import { Sky } from 'three/addons/objects/Sky.js';
 import { shaderTime, skyAmbient } from './Materials';
+import { Celestial } from './Celestial';
+import { Rain } from './Rain';
+import { DEFAULT_GRAPHICS, type GraphicsSettings } from '../data/settings';
 
 /** Handle component: the Three.js object that visualises an entity. */
 export interface RenderObject {
@@ -17,14 +20,15 @@ export const RenderObject = defineComponent<RenderObject>('RenderObject');
 const HAZE_DAY = new THREE.Color(0xc6d8e6);
 const HAZE_DUSK = new THREE.Color(0xd9a47c);
 const HAZE_NIGHT = new THREE.Color(0x0a1220);
+const HAZE_RAIN = new THREE.Color(0x8e979f);
 const DAY_SKY = new THREE.Color(0xbfd4e8);
-/** Automatic quality aims for this frame rate (see Renderer.adaptQuality). */
-const TARGET_FPS = 60;
 /** From best to cheapest: internal resolution scale and shadow/detail tier. */
 const QUALITY_LADDER: ReadonlyArray<{ scale: number; tier: 0 | 1 | 2 }> = [
   { scale: 1, tier: 2 }, { scale: 0.85, tier: 2 }, { scale: 0.7, tier: 2 }, { scale: 0.7, tier: 1 }, { scale: 0.6, tier: 1 },
   { scale: 0.7, tier: 0 }, { scale: 0.6, tier: 0 }, { scale: 0.5, tier: 0 }, { scale: 0.42, tier: 0 },
 ];
+/** Resolution steps when only the resolution is automatic. */
+const AUTO_SCALES = [1, 0.85, 0.7, 0.6, 0.5, 0.42];
 const MOON_SKY = new THREE.Color(0x5d78b0);
 
 /**
@@ -43,7 +47,16 @@ export class Renderer implements ViewportTarget {
   readonly sky = new Sky();
   private readonly fog: THREE.Fog;
   private readonly tmpColor = new THREE.Color();
+  private readonly tmpColor2 = new THREE.Color();
   private readonly sunDir = new THREE.Vector3();
+  /** Direction of the shadow-casting light: the sun, or the moon at night. */
+  private readonly lightDir = new THREE.Vector3(0.3, 0.8, 0.2).normalize();
+  private readonly tmpDir = new THREE.Vector3();
+  readonly celestial = new Celestial();
+  readonly rain = new Rain();
+  /** Smoothed rain strength (0..1): the weather fades in and out instead of switching. */
+  private rainLevel = 0;
+  private lastTimeOfDay = performance.now();
   private readonly pmrem: THREE.PMREMGenerator;
   private readonly envScene = new THREE.Scene();
   private readonly envSky = new Sky();
@@ -95,7 +108,7 @@ export class Renderer implements ViewportTarget {
     s.far = 220;
     this.sun.shadow.bias = -0.0004;
     this.sun.shadow.normalBias = 0.03;
-    this.scene.add(this.sun, this.sun.target, this.hemi, this.sky);
+    this.scene.add(this.sun, this.sun.target, this.hemi, this.sky, this.celestial.group, this.rain.object);
     // Shadows are re-rendered every few frames (shadowEvery, see render()): the
     // sun crawls, and the shadow map and its matrix stay consistent between
     // updates, so a stale map is still correct in world space.
@@ -104,37 +117,60 @@ export class Renderer implements ViewportTarget {
 
   private shadowFrame = 0;
 
-  // ---- Automatic quality ------------------------------------------------
-  // The realistic look is fill-rate bound (layered leaves, PBR, shadows). On
-  // an integrated GPU, render() measures the frame rate every 0.5 s and walks
-  // a ladder of settings: first lower the internal resolution, then cheaper
-  // shadows and shorter detail distances, then no shadows. It climbs back up
-  // after 2 s with headroom (4 s if it just had to step down).
+  // ---- Quality: graphics settings + automatic adjustment ------------------
+  // The realistic look is fill-rate bound (layered leaves, PBR, shadows). In
+  // Auto, render() measures the frame rate every 0.5 s and walks a ladder of
+  // settings: first lower the internal resolution, then cheaper shadows and
+  // shorter detail distances, then no shadows. It climbs back up after 2 s
+  // with headroom (4 s if it just had to step down). A fixed quality or
+  // resolution in the settings removes that part from the ladder.
   private basePixelRatio = 1;
-  /** Current rung of QUALITY_LADDER (0 = best). */
+  private graphics: GraphicsSettings = { ...DEFAULT_GRAPHICS };
+  private ladder: ReadonlyArray<{ scale: number; tier: 0 | 1 | 2 }> = QUALITY_LADDER;
+  /** Current rung of the ladder (0 = best). */
   private rung = 0;
+  private tier: 0 | 1 | 2 = 2;
   private fpsFrames = 0;
   private fpsWindowStart = 0;
   private headroomWindows = 0;
   private upgradeDelay = 4;
 
+  /** Applies the graphics settings (see data/settings.ts). */
+  setGraphics(g: GraphicsSettings): void {
+    this.graphics = { ...g };
+    const fixedTier = g.quality === 'high' ? 2 : g.quality === 'medium' ? 1 : g.quality === 'low' ? 0 : null;
+    const fixedScale = g.resolution === 'auto' ? null : Number(g.resolution);
+    if (fixedTier === null && fixedScale === null) this.ladder = QUALITY_LADDER;
+    else if (fixedTier === null) this.ladder = ([2, 1, 0] as const).map((tier) => ({ scale: fixedScale!, tier }));
+    else if (fixedScale === null) this.ladder = AUTO_SCALES.map((scale) => ({ scale, tier: fixedTier }));
+    else this.ladder = [{ scale: fixedScale, tier: fixedTier }];
+    this.headroomWindows = 0;
+    this.applyRung(0, true);
+  }
+
   /** Fraction of the native resolution currently rendered. */
   get resolutionScale(): number {
-    return QUALITY_LADDER[this.rung]!.scale;
+    return this.ladder[this.rung]!.scale;
   }
 
-  /** Shadow / detail tier of the current rung: 2 full, 1 reduced, 0 no shadows. */
+  /** Shadow / detail tier in use: 2 full, 1 reduced, 0 no shadows. */
   get qualityTier(): 0 | 1 | 2 {
-    return QUALITY_LADDER[this.rung]!.tier;
+    return this.tier;
   }
 
-  /** Distances CullingSystem applies to props for the current tier. */
-  get propDistances(): { view: number; treeLod: number; smallProps: number } {
-    const view = this.viewDistance;
-    switch (this.qualityTier) {
-      case 2: return { view, treeLod: 32, smallProps: 50 };
-      case 1: return { view: Math.min(view, 120), treeLod: 20, smallProps: 35 };
-      default: return { view: Math.min(view, 95), treeLod: 12, smallProps: 22 };
+  /**
+   * What CullingSystem applies to props: draw distances and how many of the
+   * nearest trees get the detailed mesh (the player's setting; in Auto it is
+   * scaled down on the cheaper tiers).
+   */
+  get propDistances(): { view: number; detailedTrees: number; smallProps: number } {
+    const view = this.viewDistance * (this.graphics.viewDistance / 100);
+    const n = this.graphics.detailedTrees;
+    const auto = this.graphics.quality === 'auto';
+    switch (this.tier) {
+      case 2: return { view, detailedTrees: n, smallProps: 50 };
+      case 1: return { view: Math.min(view, 120), detailedTrees: auto ? Math.round(n * 0.66) : n, smallProps: 35 };
+      default: return { view: Math.min(view, 95), detailedTrees: auto ? Math.round(n * 0.4) : n, smallProps: 22 };
     }
   }
 
@@ -145,27 +181,28 @@ export class Renderer implements ViewportTarget {
     const fps = (this.fpsFrames * 1000) / elapsed;
     this.fpsFrames = 0;
     this.fpsWindowStart = now;
-    if (elapsed > 2000) return; // first window, or back from a pause: not a real measurement
+    if (elapsed > 2000 || this.ladder.length < 2) return; // first window / back from a pause, or nothing to adjust
+    const target = this.graphics.targetFps;
     let next = this.rung;
-    if (fps < TARGET_FPS - 4) {
-      next += fps < TARGET_FPS / 2 ? 2 : 1; // big drops take big steps
+    if (fps < target * 0.93) {
+      next += fps < target / 2 ? 2 : 1; // big drops take big steps
       this.headroomWindows = 0;
       this.upgradeDelay = 8;
-    } else if (fps >= TARGET_FPS - 1 && ++this.headroomWindows >= this.upgradeDelay) {
+    } else if (fps >= target - 1 && ++this.headroomWindows >= this.upgradeDelay) {
       next -= 1;
       this.headroomWindows = 0;
       this.upgradeDelay = 4;
     }
-    next = Math.min(QUALITY_LADDER.length - 1, Math.max(0, next));
+    next = Math.min(this.ladder.length - 1, Math.max(0, next));
     if (next !== this.rung) this.applyRung(next);
   }
 
-  private applyRung(rung: number): void {
-    const prevTier = this.qualityTier;
+  private applyRung(rung: number, force = false): void {
     this.rung = rung;
     this.renderer.setPixelRatio(this.basePixelRatio * this.resolutionScale);
-    const tier = this.qualityTier;
-    if (tier === prevTier) return;
+    const tier = this.ladder[rung]!.tier;
+    if (tier === this.tier && !force) return;
+    this.tier = tier;
     // Tier changes recompile shaders (shadow on/off): rare by design.
     this.sun.castShadow = tier > 0;
     const size = tier === 2 ? 2048 : 1024;
@@ -184,6 +221,13 @@ export class Renderer implements ViewportTarget {
     return this.fog.far + 24;
   }
 
+  /** Vertical field of view in degrees (controls setting). */
+  setFov(deg: number): void {
+    if (this.camera.fov === deg) return;
+    this.camera.fov = deg;
+    this.camera.updateProjectionMatrix();
+  }
+
   resize(width: number, height: number, pixelRatio: number): void {
     this.basePixelRatio = pixelRatio;
     this.renderer.setPixelRatio(pixelRatio * this.resolutionScale);
@@ -196,11 +240,20 @@ export class Renderer implements ViewportTarget {
   applyTimeOfDay(cycle: DayNightCycle): void {
     const light = cycle.lightLevel;
     const elev = cycle.sunElevation;
+    const now = performance.now();
+    const dt = Math.min(0.5, (now - this.lastTimeOfDay) / 1000);
+    this.lastTimeOfDay = now;
+    this.rainLevel += (cycle.rainIntensity - this.rainLevel) * Math.min(1, dt * 0.4);
+    const rain = this.rainLevel;
     const duskness = Math.max(0, 1 - Math.abs(elev) / 0.35); // near horizon
     this.tmpColor.copy(HAZE_NIGHT).lerp(HAZE_DAY, light).lerp(HAZE_DUSK, duskness * 0.55 * light);
+    this.tmpColor.lerp(this.tmpColor2.copy(HAZE_RAIN).multiplyScalar(0.12 + 0.88 * light), rain * 0.8); // grey, darker rain haze
     this.fog.color.copy(this.tmpColor);
-    this.fog.far = 60 + 100 * light; // night closes in — and matches the AI's shorter sight range
+    // Night closes in (and matches the AI's shorter sight range); rain shortens the view too.
+    this.fog.far = (60 + 100 * light) * (1 - 0.4 * rain);
     this.fog.near = this.fog.far * 0.12;
+    this.sky.material.uniforms['uRain']!.value = rain;
+    this.sky.material.uniforms['uDay']!.value = light;
 
     const az = cycle.sunAzimuth;
     this.sunDir.set(Math.cos(az) * Math.cos(elev), Math.sin(elev), Math.sin(az) * Math.cos(elev));
@@ -208,14 +261,25 @@ export class Renderer implements ViewportTarget {
     this.sky.position.copy(this.camera.position);
     this.sky.material.uniforms['uNight']!.value = 1 - Math.min(1, Math.max(0, (light - 0.06) / 0.35));
 
+    this.celestial.update(this.camera.position, this.sunDir, light, cycle.day - 1, rain);
+
     const sinE = Math.max(0, Math.sin(elev));
-    this.sun.intensity = 3.2 * Math.min(1, sinE * 2.5);
-    // Warm and orange near the horizon, white at noon.
-    this.sun.color.setHSL(0.08, 0.85 - 0.6 * Math.min(1, sinE * 2), 0.55 + 0.4 * Math.min(1, sinE * 2));
+    const moon = this.celestial.moonDir;
+    if (sinE > 0.02 || moon.y < 0.05) {
+      // Daylight: warm and orange near the horizon, white at noon.
+      this.lightDir.copy(this.sunDir);
+      this.sun.intensity = 3.2 * Math.min(1, sinE * 2.5) * (1 - 0.7 * rain); // clouds hide the sun
+      this.sun.color.setHSL(0.08, 0.85 - 0.6 * Math.min(1, sinE * 2), 0.55 + 0.4 * Math.min(1, sinE * 2));
+    } else {
+      // Night: the moon becomes the shadow-casting light — cold, faint, brighter near full moon.
+      this.lightDir.copy(moon);
+      this.sun.intensity = (0.12 + 0.4 * this.celestial.moonBrightness) * Math.min(1, moon.y * 4) * (1 - 0.8 * rain);
+      this.sun.color.setRGB(0.62, 0.72, 1);
+    }
     // Moonlight at night: a cool fill bright enough to find your way without a torch.
     this.hemi.color.copy(MOON_SKY).lerp(DAY_SKY, light);
     this.hemi.intensity = 0.9 - 0.55 * light;
-    this.scene.environmentIntensity = 0.25 + 0.75 * light;
+    this.scene.environmentIntensity = (0.25 + 0.75 * light) * (1 - 0.3 * rain);
     skyAmbient.value.copy(this.fog.color).multiplyScalar(0.45 * this.scene.environmentIntensity);
     this.updateEnvironment();
   }
@@ -241,14 +305,11 @@ export class Renderer implements ViewportTarget {
   }
 
   /** Keep the shadow frustum centred on the player so 2048² covers 80 m crisply. */
-  followShadows(target: THREE.Vector3, cycle: DayNightCycle): void {
-    const elev = Math.max(cycle.sunElevation, 0.15);
-    const az = cycle.sunAzimuth;
-    this.sun.position.set(
-      target.x + Math.cos(az) * Math.cos(elev) * 60,
-      target.y + Math.sin(elev) * 60,
-      target.z + Math.sin(az) * Math.cos(elev) * 60,
-    );
+  followShadows(target: THREE.Vector3, _cycle: DayNightCycle): void {
+    // The light (sun by day, moon by night) never comes from lower than ~9°: long shadows, never infinite ones.
+    this.tmpDir.copy(this.lightDir);
+    if (this.tmpDir.y < 0.15) this.tmpDir.setY(0.15).normalize();
+    this.sun.position.copy(target).addScaledVector(this.tmpDir, 60);
     this.sun.target.position.copy(target);
   }
 
@@ -257,6 +318,7 @@ export class Renderer implements ViewportTarget {
 
   render(): void {
     shaderTime.value = this.clock.getElapsedTime();
+    this.rain.update(shaderTime.value, this.camera.position, this.rainLevel, this.sky.material.uniforms['uDay']!.value as number);
     this.adaptQuality(performance.now());
     if (this.shadowFrame++ % this.shadowEvery === 0) this.renderer.shadowMap.needsUpdate = true;
     this.renderer.render(this.scene, this.camera);
@@ -277,7 +339,7 @@ export class Renderer implements ViewportTarget {
    * Geometries cached by LowPolyFactory are shared and deliberately kept.
    */
   resetScene(): void {
-    const keep = new Set<THREE.Object3D>([this.sun, this.sun.target, this.hemi, this.sky]);
+    const keep = new Set<THREE.Object3D>([this.sun, this.sun.target, this.hemi, this.sky, this.celestial.group, this.rain.object]);
     for (const child of [...this.scene.children]) {
       if (keep.has(child)) continue;
       child.traverse((o) => {
@@ -305,14 +367,48 @@ function hazeSky(sky: Sky, haze: THREE.Color): void {
   m.uniforms['uHaze'] = { value: haze };
   m.uniforms['uNight'] = { value: 0 };
   m.uniforms['uNightSky'] = { value: new THREE.Color(0x070d1c) };
+  m.uniforms['uRain'] = { value: 0 };
+  m.uniforms['uDay'] = { value: 1 };
+  m.uniforms['uTime'] = shaderTime;
   m.fragmentShader = m.fragmentShader
-    .replace('uniform vec3 up;', 'uniform vec3 up;\nuniform vec3 uHaze;\nuniform float uNight;\nuniform vec3 uNightSky;')
+    .replace('uniform vec3 up;', `uniform vec3 up;
+      uniform vec3 uHaze;
+      uniform float uNight;
+      uniform vec3 uNightSky;
+      uniform float uRain;
+      uniform float uDay;
+      uniform float uTime;
+      float cHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float cNoise(vec2 p) {
+        vec2 i = floor(p), f = fract(p);
+        vec2 u = f * f * (3.0 - 2.0 * f);
+        return mix(mix(cHash(i), cHash(i + vec2(1, 0)), u.x), mix(cHash(i + vec2(0, 1)), cHash(i + vec2(1, 1)), u.x), u.y);
+      }
+      float cFbm(vec2 p) {
+        float s = 0.0, a = 0.5;
+        for (int i = 0; i < 5; i++) { s += cNoise(p) * a; p = p * 2.03 + 17.1; a *= 0.5; }
+        return s;
+      }`)
     // Like three's fog_fragment, the mix happens after tone mapping, so the
     // horizon matches fogged terrain exactly.
     .replace('#include <colorspace_fragment>', `#include <colorspace_fragment>
       float hz = 1.0 - smoothstep(-0.02, 0.3, direction.y);
       gl_FragColor.rgb = mix(gl_FragColor.rgb, linearToOutputTexel(vec4(uHaze, 1.0)).rgb, hz);
       // After sunset the scattering model turns muddy brown: fade to a night blue.
-      gl_FragColor.rgb = mix(gl_FragColor.rgb, linearToOutputTexel(vec4(mix(uNightSky, uHaze, hz), 1.0)).rgb, uNight);`);
+      gl_FragColor.rgb = mix(gl_FragColor.rgb, linearToOutputTexel(vec4(mix(uNightSky, uHaze, hz), 1.0)).rgb, uNight);
+      // Clouds: drifting noise projected on a high flat layer, thicker and
+      // darker when it rains, lit warm on the sun's side, fading into the haze.
+      if (direction.y > 0.0) {
+        vec2 uv = direction.xz / (direction.y + 0.12) * 1.4 + uTime * vec2(0.006, 0.0025);
+        float n = cFbm(uv);
+        float cover = mix(0.58, 0.28, uRain);
+        float c = smoothstep(cover, cover + 0.2, n) * smoothstep(0.0, 0.2, direction.y);
+        float sunSide = pow(max(dot(direction, vSunDirection), 0.0), 6.0);
+        vec3 lit = vec3(1.0, 0.98, 0.95) * (0.07 + 0.85 * uDay) + vec3(1.0, 0.82, 0.55) * sunSide * 0.35 * uDay;
+        lit = mix(lit, lit * 0.6, smoothstep(cover + 0.12, cover + 0.45, n)) * (1.0 - 0.45 * uRain);
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, lit, c * 0.9);
+      }
+      // Overcast: the whole sky turns grey under rain.
+      gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.55, 0.58, 0.62) * (0.08 + 0.8 * uDay), uRain * 0.55 * (1.0 - hz));`);
   m.needsUpdate = true;
 }

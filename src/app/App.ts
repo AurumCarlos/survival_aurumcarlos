@@ -6,15 +6,23 @@ import { Lifecycle } from '../core/Lifecycle';
 import { SaveStore, cleanName, newSlotId, type SlotInfo } from '../persistence/SaveStore';
 import type { WorldSnapshot } from '../persistence/WorldSnapshot';
 import { Renderer } from '../render/Renderer';
+import { SoundEngine } from '../audio/SoundEngine';
 import { MainMenu, type MenuModel } from '../ui/MainMenu';
 import { toTerrainConfig, type MapConfig } from '../world/MapConfig';
 import { TerrainService } from '../world/TerrainService';
 import { GameSession } from './GameSession';
 import { GameStateMachine, type AppState } from './GameStateMachine';
+import { loadSettings, saveSettings } from './SettingsStore';
+import {
+  CONTROL_DEFS, DEFAULT_CONTROLS, DEFAULT_GRAPHICS, DEFAULT_SIM, GRAPHICS_DEFS, SIM_DEFS, applySim, sanitize, type SettingDef,
+} from '../data/settings';
+import type { SettingsTab } from '../ui/SettingsPage';
 
 /** sessionStorage survives a refresh but not closing the tab: exactly "resume after reload". */
 const RESUME_KEY = 'survival.resume-after-reload';
 const AUTOSAVE_EVERY_SIM_SECONDS = 60;
+/** Radians per mouse pixel at sensitivity 1× (the game's original feel). */
+const BASE_MOUSE_SENSITIVITY = 0.0022;
 
 /**
  * Composition root and state orchestrator. Owns the long-lived pieces
@@ -47,9 +55,13 @@ export class App {
   private lastAutosave = 0;
   /** Save slot of the world being played. */
   private current: SlotInfo | null = null;
+  /** Procedural sound; created on the first click or key press (browser autoplay rules). */
+  private readonly sound = new SoundEngine();
+  /** Player settings (graphics, controls & audio, simulation), persisted across games. */
+  private readonly settings = loadSettings();
   private model: MenuModel = {
     save: null, saves: [], current: null, loading: { fraction: 0, label: '' }, deathCause: null, canRespawn: false, minutesSurvived: 0,
-    freshSession: true, busy: false, storageKind: null,
+    freshSession: true, busy: false, storageKind: null, settings: this.settings,
   };
 
   constructor(private readonly container: HTMLElement) {
@@ -57,6 +69,7 @@ export class App {
     container.append(this.canvas, this.ui);
     this.renderer = new Renderer(this.canvas);
     this.input = new InputManager(this.canvas);
+    this.applySettings();
     this.lifecycle = new Lifecycle({
       container, canvas: this.canvas, input: this.input, viewport: this.renderer,
       onContextLost: () => this.menu.toast('Graphics device lost — recovering…', true),
@@ -83,6 +96,11 @@ export class App {
       onResume: () => void this.resumePlay(),
       onSave: () => void this.saveNow(false),
       onQuitToMenu: () => void this.quitToMenu(),
+      onSettingChange: (section, key, value) => this.changeSetting(section, key, value),
+      onSettingsReset: (section) => {
+        Object.assign(this.settings[section], section === 'graphics' ? DEFAULT_GRAPHICS : section === 'controls' ? DEFAULT_CONTROLS : DEFAULT_SIM);
+        this.applySettings();
+      },
     }, this.model);
     this.machine.onChange((from, to) => this.onStateChange(from, to));
     this.events.on('asset:failed', ({ key, usingFallback }) => {
@@ -100,6 +118,10 @@ export class App {
         this.input.requestPointerLock();
       }
     });
+    // Audio may only start inside a user gesture.
+    const unlock = (): void => this.sound.unlock();
+    this.container.addEventListener('pointerdown', unlock);
+    window.addEventListener('keydown', unlock);
     window.addEventListener('pagehide', this.onPageHide);
     document.addEventListener('visibilitychange', this.onVisibility);
 
@@ -116,6 +138,29 @@ export class App {
     sessionStorage.removeItem(RESUME_KEY);
     if (resume && this.model.save) await this.continueGame();
     else if (this.machine.state === 'menu') this.menu.render('menu', this.model);
+  }
+
+  // ---- Settings ------------------------------------------------------------
+
+  private changeSetting(section: SettingsTab, key: string, value: number | string | boolean): void {
+    const defs: readonly SettingDef[] = section === 'graphics' ? GRAPHICS_DEFS : section === 'controls' ? CONTROL_DEFS : SIM_DEFS;
+    const target = this.settings[section] as unknown as Record<string, unknown>;
+    Object.assign(target, sanitize<Record<string, unknown>>(defs, { ...target, [key]: value }));
+    this.applySettings();
+  }
+
+  /** Pushes the settings to the renderer, input, the simulation and the open game, and saves them. */
+  private applySettings(): void {
+    const c = this.settings.controls;
+    this.renderer.setGraphics(this.settings.graphics);
+    this.renderer.setFov(c.fov);
+    this.input.mouseSensitivity = BASE_MOUSE_SENSITIVITY * c.mouseSensitivity;
+    this.input.invertY = c.invertY;
+    this.sound.setVolumes({ master: c.masterVolume / 100, ambience: c.ambienceVolume / 100, effects: c.effectsVolume / 100 });
+    this.container.classList.toggle('hide-fps', !this.settings.graphics.showFps);
+    applySim(this.settings.sim);
+    this.session?.applySimSettings();
+    saveSettings(this.settings);
   }
 
   // ---- Loading -------------------------------------------------------------
@@ -206,7 +251,7 @@ export class App {
       const session = await GameSession.create({
         renderer: this.renderer, input: this.input, assets: this.assets, uiContainer: this.ui,
         bundle, map, ...(snapshot ? { snapshot } : {}),
-        signal: abort.signal, onProgress: progress, onFrame: this.onFrame,
+        signal: abort.signal, onProgress: progress, onFrame: this.onFrame, sound: this.sound,
       });
       if (!ticket.stillValid()) {
         session.dispose();
@@ -412,6 +457,8 @@ export class App {
       if (this.session?.isInventoryOpen) this.toggleInventory(this.session, false);
       if (from === 'playing') void this.saveNow(true); // pausing is a natural checkpoint
     }
+    // The island is heard while playing and behind the pause menu, not on the title screens.
+    this.sound.mute(!(to === 'playing' || to === 'paused'));
     if (to === 'playing') this.input.setGameplayEnabled(true);
     // Any menu needs a visible cursor. Pausing with P (or the window losing
     // focus) does NOT release pointer lock by itself, and a locked pointer

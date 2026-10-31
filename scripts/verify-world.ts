@@ -90,6 +90,26 @@ async function main(): Promise<void> {
     check('nav: regrown → blocked again', !nav.isWalkable(5, 0));
   }
 
+  console.log('\n── Standing still on a slope ──');
+  {
+    // A 30° hillside (rising 0.58 m per metre along +X).
+    const t = flatTerrain();
+    const n = t.cfg.resolution + 1, step = t.cfg.size / t.cfg.resolution;
+    for (let iz = 0; iz < n; iz++) for (let ix = 0; ix < n; ix++) t.heights[iz * n + ix] = 10 + (ix * step - t.cfg.size / 2) * 0.58;
+    t.props = [];
+    const world = new World();
+    const physics = new PhysicsWorld();
+    physics.addTerrain(t);
+    const player = spawnPlayer(world, { x: 0, y: 10.2, z: 0 });
+    const body = physics.createPlayerBody({ x: 0, y: 10.2, z: 0 });
+    world.add(player, PhysicsBody, { body, originOffsetY: PLAYER_SHAPE.height / 2 + 0.05 });
+    await walk(physics, world, player, 0, 0, 1); // land
+    const idle = await walk(physics, world, player, 0, 0, 4);
+    check('an idle player does not slide down the slope', Math.hypot(idle.dx, idle.dz) < 0.02, `moved ${Math.hypot(idle.dx, idle.dz).toFixed(3)} m in 4 s`);
+    const up = await walk(physics, world, player, 3, 0, 1);
+    check('walking up the slope still works', up.dx > 1.5, `${up.dx.toFixed(2)} m`);
+  }
+
   console.log('\n── Walking speed on and around buildings ──');
   {
     const { world, physics, player } = setup();
