@@ -121,7 +121,8 @@ const chase = new Action<AIServices>('chase', (c) => {
   const d = Math.hypot(target.x - p.x, target.z - p.z);
   k.attackTimer = Math.max(0, k.attackTimer - c.dt);
 
-  if (d <= k.attackRange) {
+  // Vertical gap too: a wolf under the floor of your house can't bite you through it.
+  if (d <= k.attackRange && Math.abs(target.y - p.y) < 1.6) {
     setState(c, 'attack');
     face(c, target.x, target.z);
     if (k.attackTimer === 0) {
@@ -129,7 +130,9 @@ const chase = new Action<AIServices>('chase', (c) => {
       const s = c.world.require(c.services.player, SurvivorC);
       // Armour absorbs part of the bite (Flak halves it) and makes bleeding rarer.
       const armor = s.equipped.body ? (itemDef(s.equipped.body.item).wearable?.armor ?? 0) : 0;
-      s.vitals.health = Math.max(0, s.vitals.health - k.attackDamage * (1 - armor));
+      const dmg = k.attackDamage * (1 - armor);
+      s.vitals.health = Math.max(0, s.vitals.health - dmg);
+      c.services.events.emit('player:damaged', { entity: c.services.player, amount: dmg, source: k.species });
       // Bites have a chance to cause bleeding; the status manager owns the effect.
       if (rand(c.bb) < 0.35 * (1 - armor)) c.services.survival.applyEffect(s, 'bleeding', 20, 'combat');
     }

@@ -5,7 +5,7 @@ import { Creature, HeatSource, ResourceC, ShelterZone, Structure, Transform } fr
 import type { AssetLoader } from '../assets/AssetLoader';
 import { ISLAND, TREE_HEIGHT_STRETCH, type TerrainData, type PropKind } from '../world/TerrainGenerator';
 import type { PopulatedWorld } from '../world/WorldPopulator';
-import { campfireObject, firLowGeometry, flatMaterial, leanToObject, propGeometry, structureObject } from './LowPolyFactory';
+import { campfireObject, caveMaterial, caveShellGeometry, firLowGeometry, flatMaterial, leanToObject, propGeometry, structureObject } from './LowPolyFactory';
 import { creatureMesh } from './CreatureModels';
 import { RenderObject } from './Renderer';
 import { treeShape } from '../world/TreeSpecies';
@@ -140,6 +140,18 @@ export async function buildWorldVisuals(
     }
   }
 
+  // Caves: rock domes over the chambers carved into the mountains.
+  for (const c of terrain.caves ?? []) {
+    const cave = new THREE.Mesh(caveShellGeometry(c.length, c.width, c.height, Math.round(c.x * 13 + c.z * 7)), caveMaterial);
+    cave.geometry.userData['owned'] = true;
+    cave.position.set(c.x, c.y - 0.05, c.z);
+    cave.rotation.y = c.yaw;
+    cave.castShadow = true;
+    cave.receiveShadow = true;
+    cave.name = 'cave';
+    scene.add(cave);
+  }
+
   // Clear turquoise water: the sand under the lagoon shows through and the
   // deepening sea floor (see terrainColor) gives the shallow-to-deep gradient.
   const waterMat = new THREE.MeshLambertMaterial({ color: 0x2bb3c4, transparent: true, opacity: 0.55, depthWrite: false });
@@ -223,7 +235,8 @@ function terrainChunkMesh(t: TerrainData, ix0: number, iz0: number, cells: numbe
   const pushTri = (ax: number, az: number, bx: number, bz: number, cx: number, cz: number): void => {
     const avgH = (h(ax, az) + h(bx, bz) + h(cx, cz)) / 3;
     const slope = (t.slopes[az * n + ax]! + t.slopes[bz * n + bx]! + t.slopes[cz * n + cx]!) / 3;
-    terrainColor(c, avgH, slope, cfg.waterLevel, cfg.maxHeight, ax * 31 + az * 17);
+    const biome = t.biomes ? Math.max(t.biomes[az * n + ax]!, t.biomes[bz * n + bx]!, t.biomes[cz * n + cx]!) : -1;
+    terrainColor(c, avgH, slope, cfg.waterLevel, cfg.maxHeight, ax * 31 + az * 17, biome);
     for (const [ix, iz] of [[ax, az], [bx, bz], [cx, cz]] as const) {
       positions[o] = ix * step - half;
       positions[o + 1] = h(ix, iz);
@@ -268,13 +281,29 @@ const DEEP = new THREE.Color(0x14606e);
 const FOREST = new THREE.Color(0x4f7d35);
 const NEEDLES = new THREE.Color(0x6b6a3a);
 
-function terrainColor(out: THREE.Color, h: number, slope: number, water: number, _maxH: number, seed: number): void {
+const JUNGLE = new THREE.Color(0x2f6a2a);
+const JUNGLE_LITTER = new THREE.Color(0x4a5a26);
+const MEADOW = new THREE.Color(0x8db24a);
+const MEADOW_DRY = new THREE.Color(0xb5b45a);
+const HIGHLAND = new THREE.Color(0x7c8a4e);
+const SCREE = new THREE.Color(0x8a8378);
+const SNOW = new THREE.Color(0xeef3f6);
+const CAVE_FLOOR = new THREE.Color(0x4d4842);
+const CLIFF = new THREE.Color(0x7d7a72);
+
+function terrainColor(out: THREE.Color, h: number, slope: number, water: number, _maxH: number, seed: number, biome = -1): void {
   const v = 0.94 + Math.abs((Math.sin(seed * 12.9898) * 43758.5453) % 1) * 0.06;
+  const r2 = Math.abs((Math.sin(seed * 7.13) * 9871.3) % 1);
   if (h < water) out.copy(WET_SAND).lerp(DEEP, Math.min(1, (water - h) / 4)); // sea floor darkens with depth
   else if (h < water + 0.32) out.copy(WET_SAND); // wet sand at the waterline
-  else if (h < water + 0.72) out.copy(SAND); // the beach
-  else if (slope > 0.3) out.setHex(0x7d7a72); // rock outcrop
-  else out.copy(FOREST).lerp(NEEDLES, Math.abs((Math.sin(seed * 7.13) * 9871.3) % 1) * 0.35); // needle-strewn forest floor
+  else if (h < water + 0.72 && biome !== 6) out.copy(SAND); // the beach
+  else if (biome === 6) out.copy(CAVE_FLOOR).multiplyScalar(0.9 + r2 * 0.2);
+  else if (biome === 5) out.copy(slope > 0.35 ? CLIFF : SNOW).lerp(SCREE, slope > 0.35 ? r2 * 0.3 : r2 * 0.08); // snowy peaks, bare rock on cliffs
+  else if (slope > 0.3) out.copy(CLIFF).lerp(SCREE, r2 * 0.5); // rock faces
+  else if (biome === 4) out.copy(HIGHLAND).lerp(SCREE, 0.25 + r2 * 0.45); // stony upland grass
+  else if (biome === 3) out.copy(MEADOW).lerp(MEADOW_DRY, r2 * 0.6);
+  else if (biome === 2) out.copy(JUNGLE).lerp(JUNGLE_LITTER, r2 * 0.4);
+  else out.copy(FOREST).lerp(NEEDLES, r2 * 0.35); // needle-strewn forest floor
   out.multiplyScalar(v);
 }
 

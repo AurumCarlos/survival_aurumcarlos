@@ -1,6 +1,7 @@
 import type { Entity, World } from '../core/ecs/World';
 import { SpatialHash } from '../core/SpatialHash';
-import type { CreatureSpecies } from '../components';
+import { AIBrain, Creature, type CreatureSpecies } from '../components';
+import { defaultApex } from '../systems/ai/ApexSystem';
 import type { ResourceKind } from '../data/schema';
 import { spawnCreature, spawnResource } from '../entities/factories';
 import { NavGrid } from '../systems/ai/nav/NavGrid';
@@ -74,5 +75,50 @@ export function spawnInitialCreatures(world: World, bundle: TerrainBundle, map: 
   spawnSome('wolf', budget.wolf, minDist);
   spawnSome('deer', budget.deer, minDist * 0.6);
   spawnSome('boar', budget.boar, minDist * 0.8);
+  out.push(...spawnApexPredators(world, bundle, map, []));
+  return out;
+}
+
+/**
+ * Crocodiles in the lagoon around the island (1 per 128 m of map edge) and
+ * a bear asleep in every cave. `existing` lists apex creatures already in the
+ * world (a loaded save): only what's missing is added, so loading a save made
+ * before they existed brings them in, and loading a newer one changes nothing.
+ */
+export function spawnApexPredators(world: World, bundle: TerrainBundle, map: MapConfig, existing: CreatureSpecies[]): Entity[] {
+  const { terrain } = bundle;
+  const W = terrain.cfg.waterLevel;
+  const rand = mulberry32(map.seed + 4242);
+  const out: Entity[] = [];
+  const wantCrocs = Math.max(1, Math.round(map.size / 128));
+  const haveCrocs = existing.filter((s) => s === 'crocodile').length;
+  const sp = terrain.spawn;
+  for (let n = haveCrocs, tries = 0; n < wantCrocs && tries < 200; tries++) {
+    const ang = rand() * Math.PI * 2;
+    // Walk out from the centre to the first deep water, then a few metres more.
+    let r = terrain.cfg.size * 0.1;
+    while (r < terrain.cfg.size / 2 - 4 && sampleHeight(terrain, Math.cos(ang) * r, Math.sin(ang) * r) > W - 0.7) r += 1;
+    r += 1 + rand() * 3;
+    const x = Math.cos(ang) * r, z = Math.sin(ang) * r;
+    if (r >= terrain.cfg.size / 2 - 2 || Math.hypot(x - sp.x, z - sp.z) < 30) continue;
+    const e = spawnCreature(world, 'crocodile', { x, y: W - 0.55, z }, Math.floor(rand() * 1e9), 0);
+    const a = defaultApex('swim');
+    a.angle = ang;
+    world.require(e, AIBrain).blackboard.apex = a;
+    world.require(e, Creature).heading = ang + Math.PI / 2;
+    out.push(e);
+    n++;
+  }
+  const haveBears = existing.filter((s) => s === 'bear').length;
+  (terrain.caves ?? []).slice(haveBears).forEach((c) => {
+    const ax = Math.sin(c.yaw), az = Math.cos(c.yaw);
+    const x = c.x + ax * (c.length / 2 - 3.2), z = c.z + az * (c.length / 2 - 3.2);
+    const e = spawnCreature(world, 'bear', { x, y: c.y, z }, Math.floor(rand() * 1e9), 0);
+    const a = defaultApex('sleep');
+    a.den = { x: c.x, y: c.y, z: c.z, yaw: c.yaw, length: c.length, width: c.width, height: c.height };
+    world.require(e, AIBrain).blackboard.apex = a;
+    world.require(e, Creature).heading = c.yaw + Math.PI; // facing the entrance
+    out.push(e);
+  });
   return out;
 }

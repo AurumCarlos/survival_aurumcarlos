@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { CreatureSpecies } from '../components';
 import { cached, flatMaterial, merge, paint } from './LowPolyFactory';
+import { bearModel, crocodileModel } from './ApexModels';
 
 /**
  * Low-poly animal models, built from primitives at real-world size, facing
@@ -171,5 +172,11 @@ function boar(): THREE.Group {
 }
 
 export function creatureMesh(species: CreatureSpecies): THREE.Group {
-  return species === 'deer' ? deer() : species === 'wolf' ? wolf() : boar();
+  switch (species) {
+    case 'deer': return deer();
+    case 'wolf': return wolf();
+    case 'crocodile': return crocodileModel();
+    case 'bear': return bearModel();
+    default: return boar();
+  }
 }

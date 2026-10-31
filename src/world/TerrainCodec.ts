@@ -1,5 +1,5 @@
 import type { NavGridData } from '../systems/ai/nav/NavGrid';
-import type { PropKind, PropPlacement, Spawn, TerrainConfig, TerrainData } from './TerrainGenerator';
+import type { Cave, PropKind, PropPlacement, Spawn, TerrainConfig, TerrainData } from './TerrainGenerator';
 
 /** Everything the terrain worker produces. */
 export interface TerrainBundle {
@@ -22,6 +22,8 @@ export interface EncodedTerrain {
   maxY: number;
   spawn: Spawn;
   nav: NavGridData;
+  biomes?: Uint8Array;
+  caves?: Cave[];
 }
 
 const KINDS: readonly PropKind[] = [
@@ -47,9 +49,11 @@ export function encodeTerrain(b: TerrainBundle): { message: EncodedTerrain; tran
   });
   const message: EncodedTerrain = {
     cfg: t.cfg, heights: t.heights, slopes: t.slopes, props, chunksPerSide: t.chunksPerSide, maxY: t.maxY, spawn: t.spawn, nav: b.nav,
+    ...(t.biomes ? { biomes: t.biomes } : {}), ...(t.caves ? { caves: t.caves } : {}),
   };
   const transfer = [t.heights.buffer, t.slopes.buffer, props.buffer, b.nav.blocked.buffer, b.nav.cost.buffer] as ArrayBuffer[];
   if (b.nav.obstacles) transfer.push(b.nav.obstacles.buffer as ArrayBuffer);
+  if (t.biomes) transfer.push(t.biomes.buffer as ArrayBuffer);
   return { message, transfer };
 }
 
@@ -71,7 +75,10 @@ export function decodeTerrain(m: EncodedTerrain): TerrainBundle {
     };
   }
   return {
-    terrain: { cfg: m.cfg, heights: m.heights, slopes: m.slopes, props, chunksPerSide: m.chunksPerSide, maxY: m.maxY, spawn: { ...m.spawn } },
+    terrain: {
+      cfg: m.cfg, heights: m.heights, slopes: m.slopes, props, chunksPerSide: m.chunksPerSide, maxY: m.maxY, spawn: { ...m.spawn },
+      ...(m.biomes ? { biomes: m.biomes } : {}), ...(m.caves ? { caves: m.caves } : {}),
+    },
     nav: m.nav,
   };
 }

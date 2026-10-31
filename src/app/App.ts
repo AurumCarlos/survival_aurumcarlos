@@ -3,7 +3,7 @@ import { ASSET_MANIFEST } from '../assets/manifest';
 import { EventBus } from '../core/EventBus';
 import { InputManager } from '../core/Input';
 import { Lifecycle } from '../core/Lifecycle';
-import { SaveStore } from '../persistence/SaveStore';
+import { SaveStore, cleanName, newSlotId, type SlotInfo } from '../persistence/SaveStore';
 import type { WorldSnapshot } from '../persistence/WorldSnapshot';
 import { Renderer } from '../render/Renderer';
 import { MainMenu, type MenuModel } from '../ui/MainMenu';
@@ -45,8 +45,10 @@ export class App {
   /** Serialises save/quit so a double-clicked "Save & quit" can't save twice or quit mid-save. */
   private busy = false;
   private lastAutosave = 0;
+  /** Save slot of the world being played. */
+  private current: SlotInfo | null = null;
   private model: MenuModel = {
-    save: null, loading: { fraction: 0, label: '' }, deathCause: null, minutesSurvived: 0,
+    save: null, saves: [], current: null, loading: { fraction: 0, label: '' }, deathCause: null, minutesSurvived: 0,
     freshSession: true, busy: false, storageKind: null,
   };
 
@@ -66,7 +68,15 @@ export class App {
     this.menu = new MainMenu(this.ui, {
       onNewGame: () => this.machine.transition('config'),
       onBack: () => this.machine.transition('menu'),
-      onStart: (cfg) => void this.loadGame(cfg),
+      onStart: (cfg, name) => void this.loadGame(cfg, undefined, { slot: newSlotId(), name: cleanName(name, `Island ${cfg.seed}`) }),
+      onLoadSlot: (slot) => void this.loadSlot(slot),
+      onDeleteSlot: (slot) => void this.storeOp(() => this.store!.delete(slot), 'Save deleted'),
+      onRenameSlot: (slot, name) => void this.storeOp(() => this.store!.rename(slot, name)),
+      onDuplicateSlot: (slot) => void this.storeOp(() => this.store!.duplicate(slot, ''), 'World duplicated'),
+      onExportSlot: (slot) => void this.exportSlot(slot),
+      onImport: (file) => void this.importFile(file),
+      onRefreshSaves: () => void this.storeOp(async () => undefined),
+      onSaveAs: (name) => void this.saveAs(name),
       onContinue: () => void this.continueGame(),
       onCancelLoading: () => this.cancelLoading(),
       onResume: () => void this.resumePlay(),
@@ -118,11 +128,64 @@ export class App {
       this.menu.render(this.machine.state, this.model);
       return;
     }
-    await this.loadGame(latest.snapshot.map, latest.snapshot);
+    await this.loadGame(latest.snapshot.map, latest.snapshot, { slot: latest.record.slot, name: latest.record.name ?? `Island ${latest.snapshot.map.seed}` });
   }
 
-  private async loadGame(map: MapConfig, snapshot?: WorldSnapshot): Promise<void> {
+  private async loadSlot(slot: string): Promise<void> {
+    if (!this.store || !this.machine.can('loading')) return;
+    try {
+      const loaded = await this.store.load(slot);
+      if (!loaded) throw new Error('That save no longer exists');
+      await this.loadGame(loaded.snapshot.map, loaded.snapshot, { slot, name: loaded.record.name ?? slot });
+    } catch (err) {
+      this.menu.toast(`Can't load this save: ${err instanceof Error ? err.message : String(err)}`, true);
+    }
+  }
+
+  /** Run a save-list operation, then refresh the list. */
+  private async storeOp(op: () => Promise<unknown>, done?: string): Promise<void> {
+    if (!this.store) return;
+    try {
+      await op();
+      if (done) this.menu.toast(done);
+    } catch (err) {
+      this.menu.toast(err instanceof Error ? err.message : String(err), true);
+    }
+    await this.refreshSaveSummary();
+    if (this.machine.state === 'menu') this.menu.render('menu', this.model);
+  }
+
+  private async exportSlot(slot: string): Promise<void> {
+    const text = await this.store?.exportJson(slot);
+    if (!text) return;
+    const name = (JSON.parse(text) as { name: string }).name.replace(/[^\w\- ]+/g, '').trim() || 'island';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+    a.download = `${name}.survival.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+
+  private async importFile(file: File): Promise<void> {
+    const text = await file.text();
+    await this.storeOp(async () => {
+      const meta = await this.store!.importJson(text);
+      this.menu.toast(`Imported “${meta.name}”`);
+    });
+  }
+
+  /** Pause menu: keep playing this world in a new, separate save slot. */
+  private async saveAs(name: string): Promise<void> {
+    if (!this.session) return;
+    this.current = { slot: newSlotId(), name: cleanName(name, `${this.current?.name ?? 'Island'} (2)`) };
+    this.model.current = this.current;
+    await this.saveNow(false);
+  }
+
+  private async loadGame(map: MapConfig, snapshot?: WorldSnapshot, slot?: SlotInfo): Promise<void> {
     if (!this.machine.transition('loading')) return; // double-click / wrong state → ignored
+    this.current = slot ?? { slot: newSlotId(), name: `Island ${map.seed}` };
+    this.model.current = this.current;
     const ticket = this.machine.ticket();
     const abort = new AbortController();
     this.loadAbort = abort;
@@ -244,8 +307,9 @@ export class App {
     document.exitPointerLock();
     this.model.deathCause = cause;
     this.model.minutesSurvived = s.secondsSurvived / 60;
-    // Permadeath: the save of a dead survivor would just reload a corpse.
-    void this.store?.deleteAll().then(() => this.refreshSaveSummary());
+    // Permadeath: this world's save would just reload a corpse. Other worlds are kept.
+    const slot = this.current?.slot;
+    if (slot) void this.store?.delete(slot).then(() => this.refreshSaveSummary());
     this.machine.transition('gameover');
   }
 
@@ -257,7 +321,7 @@ export class App {
     this.busy = true;
     this.model.busy = true;
     try {
-      await this.store.save(s.capture());
+      await this.store.save(s.capture(), this.current ?? undefined);
       this.lastAutosave = s.loop.stats.simTime;
       if (!silent) this.menu.toast('Game saved');
     } catch (err) {
@@ -272,6 +336,7 @@ export class App {
 
   private async refreshSaveSummary(): Promise<void> {
     this.model.save = this.store ? await this.store.latestSummary() : null;
+    this.model.saves = this.store ? await this.store.list() : [];
   }
 
   /** Refresh/close: IndexedDB can't be trusted to commit now, so write synchronously. */
@@ -279,7 +344,7 @@ export class App {
     const s = this.session;
     const st = this.machine.state;
     if (!s || !this.store || (st !== 'playing' && st !== 'paused') || !s.survivorAlive || this.model.freshSession) return;
-    if (this.store.emergencySave(s.capture())) sessionStorage.setItem(RESUME_KEY, '1');
+    if (this.store.emergencySave(s.capture(), this.current ?? undefined)) sessionStorage.setItem(RESUME_KEY, '1');
   };
 
   /** Tab hidden (often the step before closing it): take a normal async save while we still can. */
@@ -322,6 +387,7 @@ export class App {
   private onStateChange(from: AppState, to: AppState): void {
     // Leaving the game for a menu tears the session down.
     if ((to === 'menu' || to === 'config') && this.session) this.detach();
+    if (to === 'menu' && from !== 'menu') this.menu.resetView();
     if (to === 'loading') this.model.loading = { fraction: 0, label: 'Preparing…' };
     if (to === 'paused') {
       this.input.setGameplayEnabled(false);

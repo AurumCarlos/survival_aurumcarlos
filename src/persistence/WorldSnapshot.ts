@@ -185,7 +185,7 @@ function migrate(raw: unknown): unknown {
   return raw;
 }
 
-const SPECIES: ReadonlySet<string> = new Set<CreatureSpecies>(['wolf', 'deer', 'boar']);
+const SPECIES: ReadonlySet<string> = new Set<CreatureSpecies>(['wolf', 'deer', 'boar', 'crocodile', 'bear']);
 const AI_STATES: ReadonlySet<string> = new Set<AIState>(['patrol', 'chase', 'hunt', 'flee', 'attack']);
 
 /**

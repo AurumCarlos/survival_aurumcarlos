@@ -2,6 +2,8 @@ import { parseSnapshot, serializeSnapshot, SnapshotError, type WorldSnapshot } f
 
 export interface SaveRecord {
   slot: string;
+  /** World name shown in the save list (older saves have none). */
+  name?: string;
   savedAt: number;
   version: number;
   /** Small metadata for the menu, readable without parsing the whole save. */
@@ -22,6 +24,26 @@ const DB_NAME = 'lowpoly-survival';
 const STORE = 'saves';
 const EMERGENCY_KEY = 'survival.emergency-save';
 export const AUTOSAVE_SLOT = 'autosave';
+
+/** A world's save slot: its id and display name. */
+export interface SlotInfo {
+  slot: string;
+  name: string;
+}
+
+/** Menu row: everything but the (large) JSON. */
+export type SaveMeta = Omit<SaveRecord, 'json'> & { name: string };
+
+/** Fresh unique slot id for a new world. */
+export function newSlotId(now = Date.now()): string {
+  return `world-${now.toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
+}
+
+export const MAX_NAME = 40;
+export function cleanName(name: string, fallback: string): string {
+  const n = name.replace(/\s+/g, ' ').trim().slice(0, MAX_NAME);
+  return n || fallback;
+}
 
 /** IndexedDB wrapped in promises. One object store keyed by slot name. */
 export class IndexedDbBackend implements SaveBackend {
@@ -120,8 +142,9 @@ export class SaveStore {
     return new SaveStore(new MemoryBackend(), sync);
   }
 
-  async save(snapshot: WorldSnapshot, slot = AUTOSAVE_SLOT): Promise<SaveRecord> {
-    const record = toRecord(snapshot, slot);
+  async save(snapshot: WorldSnapshot, slot: string | SlotInfo = AUTOSAVE_SLOT): Promise<SaveRecord> {
+    const info = typeof slot === 'string' ? { slot, name: '' } : slot;
+    const record = toRecord(snapshot, info);
     await this.backend.put(record);
     // The IDB copy is now at least as new; drop the emergency copy so it can't shadow later saves.
     this.clearEmergency(snapshot.savedAt);
@@ -129,14 +152,89 @@ export class SaveStore {
   }
 
   /** Synchronous, for `pagehide`. Returns false if storage is full or disabled. */
-  emergencySave(snapshot: WorldSnapshot): boolean {
+  emergencySave(snapshot: WorldSnapshot, slot: string | SlotInfo = AUTOSAVE_SLOT): boolean {
     if (!this.sync) return false;
     try {
-      this.sync.setItem(EMERGENCY_KEY, JSON.stringify(toRecord(snapshot, AUTOSAVE_SLOT)));
+      const info = typeof slot === 'string' ? { slot, name: '' } : slot;
+      this.sync.setItem(EMERGENCY_KEY, JSON.stringify(toRecord(snapshot, info)));
       return true;
     } catch {
       return false; // QuotaExceededError
     }
+  }
+
+  /**
+   * Every save, newest first, one row per world. An emergency copy (written
+   * on page close) replaces its slot's row if it is newer.
+   */
+  async list(): Promise<SaveMeta[]> {
+    const bySlot = new Map<string, SaveRecord>();
+    try {
+      for (const r of await this.backend.list()) bySlot.set(r.slot, r);
+    } catch (err) {
+      console.warn('[SaveStore] listing saves failed', err);
+    }
+    const e = this.readEmergency();
+    if (e && (bySlot.get(e.slot)?.savedAt ?? -1) < e.savedAt) bySlot.set(e.slot, e);
+    return [...bySlot.values()]
+      .sort((a, b) => b.savedAt - a.savedAt)
+      .map(({ json: _json, ...meta }) => ({ ...meta, name: displayName(meta) }));
+  }
+
+  /** One world's save (the newer of the stored copy and the emergency copy). */
+  async load(slot: string): Promise<{ snapshot: WorldSnapshot; record: SaveRecord } | null> {
+    let r = await this.backend.get(slot);
+    const e = this.readEmergency();
+    if (e && e.slot === slot && (!r || e.savedAt > r.savedAt)) r = e;
+    if (!r) return null;
+    return { snapshot: parseSnapshot(r.json), record: { ...r, name: displayName(r) } };
+  }
+
+  async delete(slot: string): Promise<void> {
+    await this.backend.delete(slot);
+    if (this.readEmergency()?.slot === slot) this.sync?.removeItem(EMERGENCY_KEY);
+  }
+
+  async rename(slot: string, name: string): Promise<void> {
+    const r = await this.backend.get(slot);
+    if (!r) return;
+    await this.backend.put({ ...r, name: cleanName(name, displayName(r)) });
+  }
+
+  /** Copy a world to a new slot (a branch you can play separately). */
+  async duplicate(slot: string, name: string): Promise<SaveMeta | null> {
+    const loaded = await this.load(slot);
+    if (!loaded) return null;
+    const copy = { ...loaded.record, slot: newSlotId(), name: cleanName(name, `${displayName(loaded.record)} (copy)`), savedAt: Date.now() };
+    await this.backend.put(copy);
+    const { json: _json, ...meta } = copy;
+    return meta;
+  }
+
+  /** JSON text of a save, for "Export" (download as a file). */
+  async exportJson(slot: string): Promise<string | null> {
+    const loaded = await this.load(slot);
+    return loaded ? JSON.stringify({ name: displayName(loaded.record), save: loaded.record.json }) : null;
+  }
+
+  /** Import an exported file as a new world slot. Throws SnapshotError on a bad file. */
+  async importJson(text: string): Promise<SaveMeta> {
+    let name = 'Imported island';
+    let json = text;
+    try {
+      const o = JSON.parse(text) as { name?: unknown; save?: unknown };
+      if (typeof o.save === 'string') {
+        json = o.save;
+        if (typeof o.name === 'string') name = o.name;
+      }
+    } catch {
+      throw new SnapshotError('That file is not a save (not valid JSON).');
+    }
+    const snapshot = parseSnapshot(json); // validates
+    const record = toRecord(snapshot, { slot: newSlotId(), name: cleanName(name, 'Imported island') });
+    await this.backend.put(record);
+    const { json: _json, ...meta } = record;
+    return { ...meta, name: record.name! };
   }
 
   /** Newest valid save across IndexedDB and the emergency copy, or null. Corrupt saves are skipped, not fatal. */
@@ -161,9 +259,9 @@ export class SaveStore {
   }
 
   /** Metadata of the newest save, for the "Continue" button. */
-  async latestSummary(): Promise<SaveRecord['summary'] & { savedAt: number } | null> {
+  async latestSummary(): Promise<SaveRecord['summary'] & { savedAt: number; name: string } | null> {
     const latest = await this.loadLatest();
-    return latest ? { ...latest.record.summary, savedAt: latest.record.savedAt } : null;
+    return latest ? { ...latest.record.summary, savedAt: latest.record.savedAt, name: displayName(latest.record) } : null;
   }
 
   async deleteAll(): Promise<void> {
@@ -186,9 +284,15 @@ export class SaveStore {
   }
 }
 
-function toRecord(s: WorldSnapshot, slot: string): SaveRecord {
+function displayName(r: Pick<SaveRecord, 'name' | 'slot' | 'summary'>): string {
+  if (r.name) return r.name;
+  return r.slot === AUTOSAVE_SLOT ? `Island ${r.summary.seed}` : r.slot;
+}
+
+function toRecord(s: WorldSnapshot, info: SlotInfo): SaveRecord {
   return {
-    slot,
+    slot: info.slot,
+    ...(info.name ? { name: info.name } : {}),
     savedAt: s.savedAt,
     version: s.version,
     summary: { day: s.summary.day, size: s.map.size, seed: s.map.seed, minutes: Math.round(s.summary.secondsSurvived / 60) },

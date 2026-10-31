@@ -210,8 +210,10 @@ const CARCASS_YIELDS: ReadonlyArray<ResourceYield[]> = [
   [y('raw_meat', 1, 2), y('raw_prime_meat', 1, 1, 0.3), y('hide', 1, 1, 0.6), y('spoiled_meat', 1, 1, 0.1)], // deer
   [y('raw_meat', 1, 2), y('pelt', 1, 1, 0.6), y('hide', 1, 1, 0.4), y('spoiled_meat', 1, 1, 0.15)], // wolf
   [y('raw_meat', 1, 2), y('raw_prime_meat', 1, 1, 0.25), y('hide', 1, 1, 0.5), y('keratin', 1, 2, 0.6), y('spoiled_meat', 1, 1, 0.1)], // boar
+  [y('raw_meat', 2, 3), y('raw_prime_meat', 1, 2, 0.6), y('hide', 1, 2, 0.8), y('keratin', 1, 3, 0.8)], // crocodile
+  [y('raw_meat', 2, 4), y('raw_prime_meat', 1, 2, 0.7), y('pelt', 1, 2, 0.9), y('hide', 1, 2, 0.7)], // bear
 ];
-export const CARCASS_OF: Readonly<Record<string, number>> = { deer: 0, wolf: 1, boar: 2 };
+export const CARCASS_OF: Readonly<Record<string, number>> = { deer: 0, wolf: 1, boar: 2, crocodile: 3, bear: 4 };
 
 export function makeResource(id: number, kind: ResourceKind, position: Resource['position'], variant = 0): Resource {
   const t = RESOURCE_TEMPLATES[kind];

@@ -109,7 +109,7 @@ export interface Interactable {
 }
 export const Interactable = defineComponent<Interactable>('Interactable');
 
-export type CreatureSpecies = 'wolf' | 'deer' | 'boar';
+export type CreatureSpecies = 'wolf' | 'deer' | 'boar' | 'crocodile' | 'bear';
 
 export interface Creature {
   species: CreatureSpecies;
@@ -222,4 +222,30 @@ export interface Blackboard {
   rngState: number;
   /** Seconds spent making no progress toward the current move target. */
   stuckTimer: number;
+  /** Crocodile / bear behaviour (ApexSystem), saved with the blackboard. */
+  apex?: ApexState;
+}
+
+/**
+ * Mode of the two big predators (see systems/ai/ApexSystem.ts). The render
+ * layer reads it to pick the animation (swim, lurk, lunge, sleep, roar…).
+ */
+export type ApexMode =
+  | 'swim' | 'lurk' | 'stalk' | 'lunge' | 'bite' | 'crawl' | 'return' // crocodile
+  | 'sleep' | 'wake' | 'roar' | 'charge' | 'swipe' | 'roam' | 'home'; // bear
+
+export interface ApexState {
+  mode: ApexMode;
+  /** Seconds in the current mode. */
+  t: number;
+  /** Seconds left before the next bite/swipe. */
+  cooldown: number;
+  /** Crocodile: angle around the island it is patrolling toward. Bear: unused. */
+  angle: number;
+  /** Crocodile: seconds spent out of the water this excursion. */
+  landTime: number;
+  /** Where it is heading (patrol target). */
+  target: Vec3 | null;
+  /** Bear: its cave (chamber centre, mouth direction). */
+  den: { x: number; y: number; z: number; yaw: number; length: number; width: number; height: number } | null;
 }

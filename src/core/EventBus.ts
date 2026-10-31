@@ -38,6 +38,8 @@ export interface GameEvents {
   'structure:placed': { entity: Entity };
   /** Emitted before the entity is destroyed. */
   'structure:removed': { entity: Entity };
+  /** The player was hit (bite, claw…). Drives the red damage flash. */
+  'player:damaged': { entity: Entity; amount: number; source: string };
   /** Short message for the player. */
   'ui:toast': { text: string; warn?: boolean };
 }

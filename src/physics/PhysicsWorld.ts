@@ -1,6 +1,7 @@
 import * as CANNON from 'cannon-es';
 import { defineComponent } from '../core/ecs/World';
 import type { Vec3 } from '../data/schema';
+import type { Cave } from '../world/TerrainGenerator';
 import type { TerrainData } from '../world/TerrainGenerator';
 import { obstacleRadius } from '../systems/ai/nav/NavGrid';
 import { treeHeight } from '../world/TreeSpecies';
@@ -143,6 +144,24 @@ export class PhysicsWorld {
     if (solid) ps.body.addShape(ps.shape, ps.offset);
     else ps.body.removeShape(ps.shape);
     ps.active = solid;
+  }
+
+  /**
+   * Cave roofs: the chamber is carved into the heightfield, so above it there
+   * is no ground — a slab at roof height lets you walk over the cave on the
+   * mountain (and keeps rain and line of sight out).
+   */
+  addCaves(caves: readonly Cave[]): void {
+    for (const c of caves) {
+      const body = new CANNON.Body({
+        mass: 0, material: this.groundMaterial,
+        collisionFilterGroup: Groups.STATIC, collisionFilterMask: Groups.PLAYER | Groups.PROJECTILE,
+      });
+      body.addShape(new CANNON.Box(new CANNON.Vec3(c.width / 2 + 0.6, 0.5, c.length / 2 + 0.3)));
+      body.position.set(c.x + Math.sin(c.yaw) * 0.6, c.y + c.height + 0.45, c.z + Math.cos(c.yaw) * 0.6);
+      body.quaternion.setFromEuler(0, c.yaw, 0);
+      this.world.addBody(body);
+    }
   }
 
   /** Number of compound static bodies created by addStaticProps (diagnostics). */

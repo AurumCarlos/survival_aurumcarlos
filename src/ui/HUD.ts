@@ -75,7 +75,12 @@ export class HUD {
         this.toast(`You slept ${Math.round(hours)} h — good morning!`);
       }),
       events.on('inventory:full', () => this.toast('Inventory full', true)),
-      events.on('ai:detected-player', () => this.flash('hurt', 0.25)),
+      // Red flash only when actually hurt — it used to flash whenever any animal
+      // (even a deer) spotted you, which looked like constant damage.
+      events.on('player:damaged', ({ source, amount }) => {
+        this.flash('hurt', Math.min(0.6, 0.2 + amount / 60));
+        this.toast(`A ${source} hit you (−${Math.round(amount)})`, true);
+      }),
     );
   }
 
@@ -102,6 +107,18 @@ export class HUD {
     const tp = world.get(player, Transform)?.position;
     if (hasGps && tp) this.el['clock']!.textContent += ` · GPS ${tp.x.toFixed(0)}, ${tp.z.toFixed(0)}`;
     this.el['temp']!.classList.toggle('danger', v.bodyTemp < 35.5 || v.bodyTemp > 38.8);
+
+    // Health slipping away without a fight: say why (once every 25 s), so it
+    // never feels like damage "for no reason".
+    if (this.lastHealth !== null && v.health < this.lastHealth - 0.001 && s.alive) {
+      const why = DAMAGE_REASON.find(([id]) => s.effects.some((e) => e.id === id));
+      const now = performance.now();
+      if (why && now - this.lastReasonAt > 25000) {
+        this.lastReasonAt = now;
+        this.toast(why[1], true);
+      }
+    }
+    this.lastHealth = v.health;
 
     this.el['effects']!.innerHTML = s.effects
       .map((e) => `<span class="${GOOD_EFFECTS.has(e.id) ? 'good' : 'bad'}">${EFFECT_LABEL[e.id]}${Number.isFinite(e.remaining) ? ` ${Math.ceil(e.remaining)}s` : ''}</span>`)
@@ -184,6 +201,8 @@ export class HUD {
     this.hitTimer = setTimeout(() => c.classList.remove('hit', 'kill'), killed ? 450 : 260);
   }
   private hitTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastHealth: number | null = null;
+  private lastReasonAt = -1e9;
 
   dispose(): void {
     for (const off of this.unsubscribe) off();
@@ -196,6 +215,15 @@ export class HUD {
     setTimeout(() => (n.style.opacity = '0'), seconds * 1000);
   }
 }
+
+const DAMAGE_REASON: ReadonlyArray<[string, string]> = [
+  ['hypothermia', 'You are freezing and losing health — get to a fire, a shelter or lower ground'],
+  ['hyperthermia', 'Heatstroke is hurting you — find shade or water'],
+  ['bleeding', 'You are bleeding — it stops on its own; eat and rest'],
+  ['starving', 'You are starving — eat something'],
+  ['dehydrated', 'You are dehydrated — drink (boil pond water first)'],
+  ['food_poisoning', 'Food poisoning is hurting you — cook meat and boil water'],
+];
 
 function pad(n: number): string {
   return n.toString().padStart(2, '0');

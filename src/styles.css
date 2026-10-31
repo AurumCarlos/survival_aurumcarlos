@@ -214,3 +214,19 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .box-actions { display: flex; justify-content: flex-end; }
 .hotbar .slot em { position: absolute; right: 4px; top: 2px; font-style: normal; font-size: 10px; font-weight: bold; }
 @media (max-width: 1100px) { .inventory { flex-direction: column; align-items: center; } .inv-right { max-width: 94vw; } }
+
+/* ---- Saved worlds (round 8) ------------------------------------------------ */
+.saves-card { width: min(640px, calc(100vw - 32px)); }
+.save-list { list-style: none; margin: 0 0 10px; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 55vh; overflow-y: auto; }
+.save-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.04); }
+.save-info { min-width: 0; flex: 1; }
+.save-info strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.save-info small { color: var(--ink-dim); font-size: 12px; }
+.save-acts { display: flex; gap: 4px; flex-shrink: 0; }
+.menu-card .save-acts button { font-size: 14px; padding: 5px 9px; margin: 0; width: auto; }
+.menu-card .save-acts button.danger { background: #8a2f2a; border-color: #b5463e; }
+.menu-card .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.rename, .save-as { display: flex; gap: 6px; align-items: center; margin: 0 0 4px; }
+.rename input, .save-as input { flex: 1; min-width: 0; font: inherit; font-size: 14px; color: var(--ink); background: rgba(0,0,0,.3); border: 1px solid var(--line); border-radius: 5px; padding: 5px 8px; }
+.menu-card .rename button, .menu-card .save-as button { width: auto; margin: 0; padding: 5px 10px; font-size: 14px; }
+@media (max-width: 560px) { .save-row { flex-direction: column; align-items: stretch; } .save-acts { justify-content: flex-end; } }

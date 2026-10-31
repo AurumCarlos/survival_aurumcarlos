@@ -38,7 +38,9 @@ function manualScheduler(): FrameScheduler & { t: number } {
 function runNight(opts: { fire?: boolean; shelter?: boolean; cloak?: boolean; activity?: Activity; seconds: number; startHour?: number }) {
   const world = new World();
   const events = new EventBus();
-  const cycle = new DayNightCycle({ ...DEFAULT_DAY_NIGHT, seed: 7 });
+  // The original temperate climate (cold nights): the island itself is now mild, but
+  // mountains and wet nights reach these temperatures.
+  const cycle = new DayNightCycle({ ...DEFAULT_DAY_NIGHT, meanTempC: 11, amplitudeC: 15, weatherC: 4.5, seed: 7 });
   cycle.setHour(opts.startHour ?? 21);
   const loop = new GameLoop(world, { scheduler: manualScheduler() });
   const survival = new SurvivalSystem(events, undefined);

@@ -1,10 +1,22 @@
 import type { AppState } from '../app/GameStateMachine';
+import type { SaveMeta } from '../persistence/SaveStore';
+import { GENERATOR_VERSION } from '../world/TerrainGenerator';
 import { MAP_LIMITS, MAP_PRESETS, MapConfigError, parseMapConfig, randomSeed, type MapConfig } from '../world/MapConfig';
 
 export interface MenuHandlers {
   onNewGame(): void;
   onContinue(): void;
-  onStart(config: MapConfig): void;
+  onStart(config: MapConfig, name: string): void;
+  /** Saves list. */
+  onLoadSlot(slot: string): void;
+  onDeleteSlot(slot: string): void;
+  onRenameSlot(slot: string, name: string): void;
+  onDuplicateSlot(slot: string): void;
+  onExportSlot(slot: string): void;
+  onImport(file: File): void;
+  onRefreshSaves(): void;
+  /** Pause menu: save the current world under a new name (a separate slot). */
+  onSaveAs(name: string): void;
   onBack(): void;
   onCancelLoading(): void;
   onResume(): void;
@@ -13,7 +25,11 @@ export interface MenuHandlers {
 }
 
 export interface MenuModel {
-  save: { day: number; size: number; minutes: number; savedAt: number } | null;
+  save: { day: number; size: number; minutes: number; savedAt: number; name: string } | null;
+  /** Every saved world, newest first. */
+  saves: SaveMeta[];
+  /** World being played (name shown in the pause menu). */
+  current: { slot: string; name: string } | null;
   loading: { fraction: number; label: string };
   deathCause: string | null;
   minutesSurvived: number;
@@ -34,7 +50,12 @@ export class MainMenu {
   private state: AppState = 'menu';
   private model: MenuModel;
   /** Config form values survive Back → New Game. */
-  private form = { size: 256, seed: '' };
+  private form = { size: 256, seed: '', name: '' };
+  /** Main menu sub-view: the title screen or the list of saved worlds. */
+  private view: 'main' | 'saves' = 'main';
+  private confirmDelete: string | null = null;
+  private renaming: string | null = null;
+  private savingAs = false;
 
   constructor(container: HTMLElement, private readonly h: MenuHandlers, model: MenuModel) {
     this.model = model;
@@ -48,7 +69,19 @@ export class MainMenu {
     this.root.addEventListener('input', this.onInput);
     this.root.addEventListener('submit', (e) => {
       e.preventDefault();
-      this.submitConfig();
+      const form = e.target as HTMLFormElement;
+      if (form.dataset['form'] === 'rename') {
+        const v = form.querySelector<HTMLInputElement>('input[name=newname]')?.value ?? '';
+        const slot = this.renaming;
+        this.renaming = null;
+        if (slot) this.h.onRenameSlot(slot, v);
+      } else if (form.dataset['form'] === 'save-as') {
+        const v = form.querySelector<HTMLInputElement>('input[name=asname]')?.value ?? '';
+        this.savingAs = false;
+        this.h.onSaveAs(v);
+      } else {
+        this.submitConfig();
+      }
     });
   }
 
@@ -61,11 +94,16 @@ export class MainMenu {
 
     switch (state) {
       case 'menu':
+        if (this.view === 'saves') {
+          this.root.innerHTML = this.savesHtml();
+          break;
+        }
         this.root.innerHTML = `
           <div class="menu-card">
             <h1>Low-Poly Survival</h1>
             <p class="tag">Stay fed. Stay warm. Stay hidden.</p>
-            <button data-act="continue" ${m.save ? '' : 'disabled'}>Continue${m.save ? `<small>Day ${m.save.day} · ${m.save.size} m map · ${m.save.minutes} min · ${timeAgo(m.save.savedAt)}</small>` : '<small>No saved game</small>'}</button>
+            <button data-act="continue" ${m.save ? '' : 'disabled'}>Continue${m.save ? `<small>${escapeHtml(m.save.name)} · day ${m.save.day} · ${m.save.size} m · ${m.save.minutes} min · ${timeAgo(m.save.savedAt)}</small>` : '<small>No saved game</small>'}</button>
+            <button data-act="saves">Load game<small>${m.saves.length ? `${m.saves.length} saved world${m.saves.length > 1 ? 's' : ''} — load, rename, copy, delete, import/export` : 'No saved worlds yet · import a save file'}</small></button>
             <button data-act="new" class="primary">New game</button>
             ${m.storageKind === 'memory' ? '<p class="warn-line">Saving is unavailable in this browser mode — progress will be lost on reload.</p>' : ''}
           </div>`;
@@ -74,6 +112,9 @@ export class MainMenu {
         this.root.innerHTML = `
           <form class="menu-card config" novalidate>
             <h2>New world</h2>
+            <label class="row">Name
+              <input name="wname" type="text" placeholder="My island" value="${escapeAttr(this.form.name)}" maxlength="40">
+            </label>
             <fieldset><legend>Map size</legend>
               <div class="presets">${MAP_PRESETS.map((p) => `
                 <label class="preset${p.size === this.form.size ? ' on' : ''}"><input type="radio" name="preset" value="${p.size}" ${p.size === this.form.size ? 'checked' : ''}>
@@ -108,7 +149,11 @@ export class MainMenu {
           <div class="menu-card">
             <h2>${m.freshSession ? 'Ready' : 'Paused'}</h2>
             <button data-act="resume" class="primary">${m.freshSession ? 'Play' : 'Resume'}<small>Click to capture the mouse</small></button>
+            ${m.current ? `<p class="tag">${escapeHtml(m.current.name)}</p>` : ''}
             ${m.freshSession ? '' : `<button data-act="save" ${m.busy ? 'disabled' : ''}>Save game</button>`}
+            ${m.freshSession ? '' : this.savingAs
+              ? `<form class="save-as" data-form="save-as"><input name="asname" type="text" maxlength="40" placeholder="New save name" value="${escapeAttr(`${m.current?.name ?? 'Island'} (2)`)}"><button type="submit" class="primary" ${m.busy ? 'disabled' : ''}>Save</button><button type="button" data-act="saveas-cancel">✕</button></form>`
+              : `<button data-act="saveas" ${m.busy ? 'disabled' : ''}>Save as new…<small>Keeps this world in a separate save from now on</small></button>`}
             <button data-act="quit" ${m.busy ? 'disabled' : ''}>Save &amp; quit to menu</button>
             <p class="keys">WASD move · Shift sprint · C crouch · E harvest · I inventory · LMB swing · RMB throw · B build · 1–6 hotbar</p>
           </div>`;
@@ -126,6 +171,41 @@ export class MainMenu {
         this.root.innerHTML = '';
         break;
     }
+  }
+
+  /** Show the title screen (not the saves list) next time the menu opens. */
+  resetView(): void {
+    this.view = 'main';
+    this.savingAs = false;
+  }
+
+  private savesHtml(): string {
+    const m = this.model;
+    const rows = m.saves.map((r) => {
+      const slot = escapeAttr(r.slot);
+      const name = this.renaming === r.slot
+        ? `<form class="rename" data-form="rename"><input name="newname" type="text" maxlength="40" value="${escapeAttr(r.name)}" autofocus><button type="submit" class="primary">OK</button><button type="button" data-act="rename-cancel">✕</button></form>`
+        : `<strong>${escapeHtml(r.name)}</strong>`;
+      return `<li class="save-row">
+        <div class="save-info">${name}<small>Day ${r.summary.day} · ${r.summary.size} m · seed ${r.summary.seed} · ${r.summary.minutes} min played · ${timeAgo(r.savedAt)}</small></div>
+        <div class="save-acts">
+          <button data-act="load" data-slot="${slot}" class="primary" ${m.busy ? 'disabled' : ''}>Load</button>
+          <button data-act="rename" data-slot="${slot}" title="Rename">✎</button>
+          <button data-act="dup" data-slot="${slot}" title="Duplicate">⧉</button>
+          <button data-act="export" data-slot="${slot}" title="Export to a file">⇩</button>
+          <button data-act="del" data-slot="${slot}" class="${this.confirmDelete === r.slot ? 'danger' : ''}" title="Delete">${this.confirmDelete === r.slot ? 'Delete?' : '🗑'}</button>
+        </div></li>`;
+    }).join('');
+    return `
+      <div class="menu-card saves-card">
+        <h2>Saved worlds</h2>
+        ${m.saves.length ? `<ul class="save-list">${rows}</ul>` : '<p class="tag">No saved worlds yet.</p>'}
+        <div class="actions">
+          <button data-act="saves-back">Back</button>
+          <button data-act="import">Import a save file…</button>
+          <input name="importfile" type="file" accept=".json,application/json" hidden>
+        </div>
+      </div>`;
   }
 
   setLoading(fraction: number, label: string): void {
@@ -151,6 +231,40 @@ export class MainMenu {
     if (!target || (target as HTMLButtonElement).disabled) return;
     switch (target.dataset['act']) {
       case 'continue': return this.h.onContinue();
+      case 'saves':
+        this.view = 'saves';
+        this.confirmDelete = this.renaming = null;
+        this.h.onRefreshSaves();
+        return this.render(this.state);
+      case 'saves-back':
+        this.view = 'main';
+        return this.render(this.state);
+      case 'load': return this.h.onLoadSlot(target.dataset['slot']!);
+      case 'del': {
+        const slot = target.dataset['slot']!;
+        if (this.confirmDelete !== slot) {
+          this.confirmDelete = slot;
+          return this.render(this.state);
+        }
+        this.confirmDelete = null;
+        return this.h.onDeleteSlot(slot);
+      }
+      case 'rename':
+        this.renaming = target.dataset['slot']!;
+        return this.render(this.state);
+      case 'rename-cancel':
+        this.renaming = null;
+        return this.render(this.state);
+      case 'dup': return this.h.onDuplicateSlot(target.dataset['slot']!);
+      case 'export': return this.h.onExportSlot(target.dataset['slot']!);
+      case 'import': return void this.root.querySelector<HTMLInputElement>('input[name=importfile]')?.click();
+      case 'saveas':
+        this.savingAs = true;
+        this.render(this.state);
+        return void this.root.querySelector<HTMLInputElement>('input[name=asname]')?.select();
+      case 'saveas-cancel':
+        this.savingAs = false;
+        return this.render(this.state);
       case 'new': return this.h.onNewGame();
       case 'back': return this.h.onBack();
       case 'menu': return this.h.onQuitToMenu();
@@ -182,6 +296,11 @@ export class MainMenu {
       });
     } else if (t.name === 'seed') {
       this.form.seed = t.value;
+    } else if (t.name === 'wname') {
+      this.form.name = t.value;
+    } else if (t.name === 'importfile' && t.files?.[0]) {
+      this.h.onImport(t.files[0]);
+      t.value = '';
     }
   };
 
@@ -190,10 +309,10 @@ export class MainMenu {
     try {
       const raw = this.root.querySelector<HTMLInputElement>('input[name=size]')?.value ?? '';
       if (raw.trim() === '') throw new MapConfigError('Enter a map size.');
-      const cfg = parseMapConfig({ size: raw, seed: this.form.seed.trim() });
+      const cfg = parseMapConfig({ size: raw, seed: this.form.seed.trim(), gen: GENERATOR_VERSION });
       if (cfg.size !== Number(raw)) this.toast(`Map size adjusted to ${cfg.size} m (multiples of ${MAP_LIMITS.step}, ${MAP_LIMITS.minSize}–${MAP_LIMITS.maxSize}).`);
       this.form.size = cfg.size;
-      this.h.onStart(cfg);
+      this.h.onStart(cfg, this.form.name.trim() || `Island ${cfg.seed}`);
     } catch (e) {
       if (err) err.textContent = e instanceof Error ? e.message : String(e);
     }

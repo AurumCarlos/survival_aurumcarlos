@@ -29,6 +29,18 @@ export function spawnPlayer(world: World, pos: Vec3, name = 'Survivor'): Entity 
 }
 
 const SPECIES: Record<CreatureSpecies, Omit<Creature, 'perception' | 'heading'> & { perception: Parameters<typeof makePerception>[0] }> = {
+  crocodile: {
+    species: 'crocodile', health: 180, maxHealth: 180, walkSpeed: 1.3, runSpeed: 7.5,
+    attackDamage: 28, attackRange: 2.4, attackCooldown: 2.2, attackTimer: 0,
+    temperament: 'predator', fleeHealthFraction: 0.25,
+    perception: { sightRange: 22, hearing: 1.2, reactionTime: 0.8, fov: (220 * Math.PI) / 180 },
+  },
+  bear: {
+    species: 'bear', health: 320, maxHealth: 320, walkSpeed: 1.4, runSpeed: 7,
+    attackDamage: 32, attackRange: 2.5, attackCooldown: 1.6, attackTimer: 0,
+    temperament: 'territorial', fleeHealthFraction: 0.12,
+    perception: { sightRange: 18, hearing: 1.4, reactionTime: 1.0 },
+  },
   wolf: {
     species: 'wolf', health: 60, maxHealth: 60, walkSpeed: 1.5, runSpeed: 5.4,
     attackDamage: 12, attackRange: 1.6, attackCooldown: 1.2, attackTimer: 0,
@@ -62,11 +74,12 @@ export function spawnCreature(world: World, species: CreatureSpecies, home: Vec3
     waypoints.push({ x: home.x + Math.cos(a) * r, y: home.y, z: home.z + Math.sin(a) * r });
   }
   world.add(e, AIBrain, {
-    tree: t.temperament === 'prey' ? 'prey' : 'predator',
+    // Crocodiles and bears have their own brains (ApexSystem); the others share behaviour trees.
+    tree: species === 'crocodile' || species === 'bear' ? species : t.temperament === 'prey' ? 'prey' : 'predator',
     blackboard: makeBlackboard(home, waypoints, seed),
     lod: 'active',
   });
-  world.add(e, Cullable, { radius: 1.2, maxDistance: 120, visible: true });
+  world.add(e, Cullable, { radius: species === 'crocodile' ? 2.6 : species === 'bear' ? 1.8 : 1.2, maxDistance: 120, visible: true });
   return e;
 }
 

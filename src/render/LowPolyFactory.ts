@@ -797,3 +797,63 @@ export function stairsGeometry(): THREE.BufferGeometry {
     return merge(parts);
   });
 }
+
+// ---------------------------------------------------------------------------
+// Caves: a rough rock dome over the chamber carved into the mountain. Local
+// frame: origin at the chamber centre on the floor, +Z into the mountain,
+// the mouth (open) toward −Z. Drawn double-sided: you see it from inside.
+// ---------------------------------------------------------------------------
+
+export const caveMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true, side: THREE.DoubleSide });
+
+export function caveShellGeometry(length: number, width: number, height: number, seed: number): THREE.BufferGeometry {
+  const dome = new THREE.SphereGeometry(1, 18, 9, 0, Math.PI * 2, 0, Math.PI / 2).toNonIndexed();
+  dome.scale(width / 2 + 0.9, height, length / 2 + 0.9);
+  // Rough, uneven rock: displace by position (shared corners move together).
+  const p = dome.attributes['position']!;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    const k = 1 + (pseudo(Math.round(x * 3) * 13 + Math.round(y * 3) * 7 + Math.round(z * 3) * 3 + seed) - 0.5) * 0.22;
+    p.setXYZ(i, x * k, Math.max(0, y * k - 0.15), z * k);
+  }
+  // Cut the mouth: drop the triangles at the front, below the arch.
+  const keep: number[] = [];
+  const mouthZ = -(length / 2) * 0.62;
+  for (let tri = 0; tri < p.count / 3; tri++) {
+    let front = 0, low = 0;
+    for (let k = 0; k < 3; k++) {
+      if (p.getZ(tri * 3 + k) < mouthZ) front++;
+      if (p.getY(tri * 3 + k) < height * 0.82) low++;
+    }
+    if (front >= 2 && low >= 1) continue;
+    for (let k = 0; k < 9; k++) keep.push(p.array[tri * 9 + k]!);
+  }
+  const shell = new THREE.BufferGeometry();
+  shell.setAttribute('position', new THREE.Float32BufferAttribute(keep, 3));
+  shell.computeVertexNormals();
+  const parts: THREE.BufferGeometry[] = [paint(shell, 0x5f5a53, 0.18, seed)];
+  // Boulders framing the mouth, a lintel, and rubble on the floor.
+  const mz = -length / 2 + 0.6;
+  for (const [x, y, z, r] of [
+    [-width / 2 + 0.6, 0.9, mz, 1.3], [width / 2 - 0.6, 1.1, mz, 1.4], [-width / 2 + 0.3, 2.6, mz + 0.4, 1.1], [width / 2 - 0.2, 2.8, mz + 0.5, 1.0],
+    [-1.2, height * 0.86, mz + 0.6, 1.2], [1.4, height * 0.88, mz + 0.8, 1.1], [0, height * 0.95, mz + 1.2, 1.3],
+    [-width / 2 + 1.2, 0.3, 1.5, 0.6], [width / 2 - 1.4, 0.25, -1.5, 0.5], [1.5, 0.2, length / 2 - 1.2, 0.7], [-2.5, 0.2, length / 2 - 2.5, 0.5],
+  ] as const) {
+    parts.push(paint(wobble(new THREE.IcosahedronGeometry(r, 0), 0.35, seed + x * 7 + z).translate(x, y, z), 0x6b665e, 0.15, seed + r * 10));
+  }
+  // Stalactites hanging from the roof.
+  for (let k = 0; k < 9; k++) {
+    const x = (pseudo(seed + k * 3) - 0.5) * width * 0.6, z = (pseudo(seed + k * 5 + 1) - 0.3) * length * 0.6;
+    const u = (x / (width / 2)) ** 2 + (z / (length / 2)) ** 2;
+    if (u > 0.7) continue;
+    const top = height * Math.sqrt(1 - u) - 0.1, len = 0.5 + pseudo(seed + k) * 0.9;
+    parts.push(paint(new THREE.ConeGeometry(0.16, len, 5).rotateX(Math.PI).translate(x, top - len / 2, z), 0x7a746b, 0.1, k));
+  }
+  // Bones at the back: something lives here.
+  for (let k = 0; k < 5; k++) {
+    const x = (pseudo(seed + k * 11) - 0.5) * 3, z = length / 2 - 3 + pseudo(seed + k * 13) * 1.5;
+    parts.push(paint(new THREE.CylinderGeometry(0.04, 0.05, 0.6, 5).rotateZ(Math.PI / 2).rotateY(k * 1.3).translate(x, 0.05, z), 0xe2dccb, 0.05));
+  }
+  parts.push(paint(new THREE.SphereGeometry(0.16, 6, 4).scale(1, 0.8, 1.3).translate(0.8, 0.12, length / 2 - 2.2), 0xe2dccb, 0.05)); // skull
+  return merge(parts);
+}

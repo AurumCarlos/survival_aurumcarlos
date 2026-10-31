@@ -168,7 +168,7 @@ async function main(): Promise<void> {
 
     // Sleeping outside in the cold is dangerous.
     const w2 = new World();
-    const c2 = new DayNightCycle({ ...DEFAULT_DAY_NIGHT, seed: 7 });
+    const c2 = new DayNightCycle({ ...DEFAULT_DAY_NIGHT, meanTempC: 11, amplitudeC: 15, weatherC: 4.5, seed: 7 }); // a cold night (mountains)
     const ev2 = new EventBus();
     const surv2 = new SurvivalSystem(ev2);
     const env2 = new EnvironmentSystem(c2);

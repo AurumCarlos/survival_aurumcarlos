@@ -29,6 +29,8 @@ export class CreatureAnimationSystem implements System {
     for (const e of world.query(Creature, Transform, RenderObject)) {
       const obj = world.require(e, RenderObject).object;
       if (!obj.visible) continue;
+      const sp = world.require(e, Creature).species;
+      if (sp === 'crocodile' || sp === 'bear') continue; // skeletal rigs: ApexAnimation
       let rig = this.rigs.get(e);
       if (!rig) {
         rig = {

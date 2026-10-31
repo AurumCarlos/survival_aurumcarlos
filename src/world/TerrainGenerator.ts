@@ -32,11 +32,65 @@ export interface TerrainConfig {
   spawnClearRadius: number;
   /** Chunk edge length for culling/instancing. */
   chunkSize: number;
+  /**
+   * Generator version. 1 = the flat desert island (kept so older saves
+   * regenerate exactly the same world); 2 = mountains, caves and biomes.
+   */
+  gen?: number;
+}
+
+/** Newest generator; new worlds use it. */
+export const GENERATOR_VERSION = 2;
+
+export const BIOME = { beach: 0, forest: 1, jungle: 2, meadow: 3, highland: 4, snow: 5, cave: 6 } as const;
+export type Biome = (typeof BIOME)[keyof typeof BIOME];
+export const BIOME_NAME = ['Beach', 'Forest', 'Jungle', 'Meadow', 'Highlands', 'Snowy peak', 'Cave'] as const;
+
+/**
+ * A cave dug into a mountainside: a flat-floored chamber (carved into the
+ * heightfield) under a rock roof (mesh + colliders). The mouth faces downhill.
+ */
+export interface Cave {
+  /** Centre of the chamber floor. */
+  x: number;
+  z: number;
+  /** Floor height. */
+  y: number;
+  /** Direction from the mouth into the mountain: (sin yaw, cos yaw). */
+  yaw: number;
+  length: number;
+  width: number;
+  /** Ceiling height above the floor. */
+  height: number;
+}
+
+/** Local cave coordinates: s along the axis (0 = centre, −L/2 = mouth), w across. */
+export function caveLocal(c: Cave, x: number, z: number): { s: number; w: number } {
+  const dx = x - c.x, dz = z - c.z;
+  const ax = Math.sin(c.yaw), az = Math.cos(c.yaw);
+  return { s: dx * ax + dz * az, w: dx * az - dz * ax };
+}
+
+/** Inside the chamber footprint (ellipse), with an optional margin in metres. */
+/** Length of the ramp graded in front of a cave mouth (m). */
+export const CAVE_APPROACH = 8;
+
+/** In the chamber or on the approach in front of the mouth (kept clear of trees and rocks). */
+export function caveClearZone(c: Cave, x: number, z: number): boolean {
+  if (insideCave(c, x, z, 3)) return true;
+  const { s, w } = caveLocal(c, x, z);
+  return s < -c.length / 2 && s > -c.length / 2 - CAVE_APPROACH - 2 && Math.abs(w) < c.width / 2 + 2.5;
+}
+
+export function insideCave(c: Cave, x: number, z: number, margin = 0): boolean {
+  const { s, w } = caveLocal(c, x, z);
+  const a = c.length / 2 + margin, b = c.width / 2 + margin;
+  return (s * s) / (a * a) + (w * w) / (b * b) <= 1;
 }
 
 export const DEFAULT_TERRAIN: TerrainConfig = {
   seed: 1337, size: 256, resolution: 192, maxHeight: 6, baseFrequency: 1 / 80,
-  waterLevel: 1.2, spawnClearRadius: 8, chunkSize: 32,
+  waterLevel: 1.2, spawnClearRadius: 8, chunkSize: 32, gen: 1,
 };
 
 /**
@@ -83,6 +137,10 @@ export interface TerrainData {
   maxY: number;
   /** Where a new game starts: on the beach, like a castaway. */
   spawn: Spawn;
+  /** Biome per height vertex (gen 2+). */
+  biomes?: Uint8Array;
+  /** Caves (gen 2+). */
+  caves?: Cave[];
 }
 
 interface Pond {
@@ -97,8 +155,14 @@ class IslandShape {
   readonly radius: number;
   readonly beach: number;
   readonly ponds: Pond[] = [];
+  /** Mountains (gen 2): centre, peak height above the lowlands, radius. */
+  readonly peaks: Array<{ x: number; z: number; h: number; r: number }> = [];
+  readonly caves: Cave[] = [];
+  readonly gen: number;
   private readonly coastNoise: Perlin;
   private readonly hills: Perlin;
+  private readonly crags: Perlin;
+  private readonly moistureNoise: Perlin;
 
   constructor(readonly cfg: TerrainConfig) {
     this.half = cfg.size / 2;
@@ -106,6 +170,52 @@ class IslandShape {
     this.beach = clamp(this.half * 0.13, ISLAND.beachMin, ISLAND.beachMax);
     this.coastNoise = new Perlin(cfg.seed + 911);
     this.hills = new Perlin(cfg.seed);
+    this.crags = new Perlin(cfg.seed + 4242);
+    this.moistureNoise = new Perlin(cfg.seed + 777);
+    this.gen = cfg.gen ?? 1;
+  }
+
+  /**
+   * Mountain height (gen 2) at (x, z), before fading toward the coast: smooth
+   * domes with ridged crags, so there are cliffs, gullies and summits.
+   */
+  mountain(x: number, z: number): number {
+    let m = 0;
+    for (const p of this.peaks) {
+      const t = Math.hypot(x - p.x, z - p.z) / p.r;
+      if (t >= 1) continue;
+      const bump = (1 - t * t) ** 2;
+      const ridge = this.crags.ridged(x / 38 + p.x, z / 38 - p.z, 4); // 0..1
+      const spur = this.crags.fbm(x / 16, z / 16, 2) * 0.12;
+      m = Math.max(m, p.h * bump * (0.62 + 0.55 * ridge + spur));
+    }
+    return m;
+  }
+
+  /** 0 on the beach and its hinterland, 1 well inland: mountains never touch the flat beach. */
+  inlandFade(d: number, beach: number): number {
+    return smoothstep(beach + 8, beach + 34, d);
+  }
+
+  /** 0 = dry, 1 = wet. */
+  moisture(x: number, z: number): number {
+    return clamp((this.moistureNoise.fbm(x / 90 + 13, z / 90 - 41, 3) + 0.8) / 1.6, 0, 1);
+  }
+
+  /** Biome at a point, given its height. */
+  biomeAt(x: number, z: number, h: number): Biome {
+    const W = this.cfg.waterLevel;
+    for (const c of this.caves) if (insideCave(c, x, z, 0.5)) return BIOME.cave;
+    const { d, beach } = this.zone(x, z);
+    if (d < beach) return BIOME.beach;
+    if (this.gen < 2) return BIOME.forest;
+    const top = this.peaks.reduce((a, p) => Math.max(a, p.h), 0);
+    if (top > 0 && h > W + 3 + top * 0.66) return BIOME.snow;
+    if (h > W + 11) return BIOME.highland;
+    const m = this.moisture(x, z);
+    if (m > 0.62) return BIOME.jungle;
+    if (m < 0.33) return BIOME.meadow;
+    return BIOME.forest;
   }
 
   /** Coastline radius and beach width for a direction. Sampled on a circle so it is seamless. */
@@ -144,6 +254,21 @@ class IslandShape {
       const hills = (this.hills.fbm(x * f, z * f, 5) + 1) * 0.5;
       const outcrop = Math.max(0, this.hills.ridged(x * f * 2.6 + 40, z * f * 2.6 - 17, 3) - 0.58) * 3;
       h = W + 0.7 + inland * (0.6 + hills * this.cfg.maxHeight + outcrop);
+      if (this.gen >= 2) h += this.mountain(x, z) * this.inlandFade(d, beach);
+    }
+    // Caves: carve the chamber floor flat into the mountainside, and keep the
+    // ground in front of the mouth no higher than the floor.
+    for (const c of this.caves) {
+      const { s, w } = caveLocal(c, x, z);
+      if (Math.abs(w) > c.width / 2 + 3 || s > c.length / 2 + 2.5 || s < -c.length / 2 - CAVE_APPROACH) continue;
+      if (insideCave(c, x, z, 0.4)) {
+        h = c.y + this.hills.noise2(x / 3, z / 3) * 0.05;
+      } else if (s < -c.length / 2 + 2) {
+        // Approach: a smooth ramp from the cave floor out to the natural ground.
+        const out = smoothstep(0, CAVE_APPROACH, -(s + c.length / 2));
+        const side = smoothstep(c.width / 2 - 1, c.width / 2 + 3, Math.abs(w));
+        h = lerp(lerp(c.y, h, out), h, side);
+      }
     }
     // Freshwater ponds sit in hollows in the forest.
     for (const p of this.ponds) {
@@ -169,6 +294,8 @@ export function generateTerrain(cfg: TerrainConfig = DEFAULT_TERRAIN): TerrainDa
   const sr = sc.coast - sc.beach * 0.5;
   const sx = Math.cos(spawnAngle) * sr, sz = Math.sin(spawnAngle) * sr;
 
+  if (island.gen >= 2) placeMountainsAndCaves(island, rand);
+
   const pondCount = cfg.size <= 192 ? 1 : cfg.size <= 384 ? 2 : 3;
   const pondR = clamp(cfg.size * 0.025, 5, 10);
   const maxPondDist = Math.max(4, island.radius * (1 - ISLAND.wobble) - island.beach - pondR - 14);
@@ -176,6 +303,8 @@ export function generateTerrain(cfg: TerrainConfig = DEFAULT_TERRAIN): TerrainDa
     const a = rand() * Math.PI * 2, r = Math.sqrt(rand()) * maxPondDist;
     const p = { x: Math.cos(a) * r, z: Math.sin(a) * r, r: pondR * (0.8 + rand() * 0.4) };
     if (island.ponds.some((q) => Math.hypot(q.x - p.x, q.z - p.z) < q.r + p.r + 25)) continue;
+    // Ponds lie in the lowlands, not halfway up a mountain or in a cave.
+    if (island.gen >= 2 && (island.mountain(p.x, p.z) > 1.5 || island.caves.some((c) => Math.hypot(c.x - p.x, c.z - p.z) < c.length + p.r + 8))) continue;
     island.ponds.push(p);
   }
 
@@ -211,8 +340,62 @@ export function generateTerrain(cfg: TerrainConfig = DEFAULT_TERRAIN): TerrainDa
     spawn: { x: sx, y: 0, z: sz, yaw: Math.atan2(sx, sz) },
   };
   data.spawn.y = sampleHeight(data, sx, sz);
+  if (island.gen >= 2) {
+    const biomes = new Uint8Array(n * n);
+    for (let iz = 0; iz < n; iz++) {
+      for (let ix = 0; ix < n; ix++) biomes[iz * n + ix] = island.biomeAt(ix * step - half, iz * step - half, heights[iz * n + ix]!);
+    }
+    data.biomes = biomes;
+    data.caves = island.caves.map((c) => ({ ...c }));
+  }
   data.props = scatterProps(data, island, rand);
   return data;
+}
+
+/**
+ * Gen 2 relief: 1–3 mountains inland (taller on bigger maps), each with a
+ * cave on its flank whose mouth faces downhill. Uses its own RNG so the
+ * spawn point and ponds don't shift between seeds' layouts.
+ */
+function placeMountainsAndCaves(island: IslandShape, _rand: () => number): void {
+  const cfg = island.cfg;
+  const rand = mulberry32(cfg.seed + 31337);
+  const count = cfg.size <= 192 ? 1 : cfg.size <= 384 ? 2 : 3;
+  const maxR = Math.max(6, island.radius * (1 - ISLAND.wobble) - island.beach - 40);
+  const peakH = clamp(cfg.size * 0.115, 16, 40);
+  const peakR = clamp(cfg.size * 0.2, 26, 80);
+  for (let tries = 0; island.peaks.length < count && tries < 300; tries++) {
+    const a = rand() * Math.PI * 2, r = Math.sqrt(rand()) * maxR * 0.85;
+    const p = { x: Math.cos(a) * r, z: Math.sin(a) * r, h: peakH * (0.8 + rand() * 0.35), r: peakR * (0.8 + rand() * 0.35) };
+    if (island.peaks.some((q) => Math.hypot(q.x - p.x, q.z - p.z) < (q.r + p.r) * 0.6)) continue;
+    island.peaks.push(p);
+  }
+  // A cave on each mountain's flank: where the ground is about a third of the
+  // way up, the slope is walkable, and the mouth looks downhill.
+  for (const p of island.peaks) {
+    let best: { c: Cave; score: number } | null = null;
+    for (let k = 0; k < 24; k++) {
+      const a = (k / 24) * Math.PI * 2 + rand() * 0.2;
+      for (const f of [0.35, 0.45, 0.55, 0.65, 0.75, 0.85]) {
+        const mx = p.x + Math.cos(a) * p.r * f, mz = p.z + Math.sin(a) * p.r * f;
+        const { d, beach } = island.zone(mx, mz);
+        if (d - beach < 18) continue;
+        const L = 15, Wd = 10;
+        // Chamber axis points from the mouth toward the summit.
+        const yaw = Math.atan2(p.x - mx, p.z - mz);
+        const cx = mx + Math.sin(yaw) * L / 2, cz = mz + Math.cos(yaw) * L / 2;
+        const floor = island.height(mx, mz);
+        const back = island.height(mx + Math.sin(yaw) * L, mz + Math.cos(yaw) * L);
+        const front = island.height(mx - Math.sin(yaw) * 6, mz - Math.cos(yaw) * 6);
+        const depth = back - floor; // how much rock is above the back of the chamber
+        const ramp = (floor - front) / 6;
+        if (depth < 4 || ramp > 0.9 || ramp < -0.1) continue;
+        const score = depth - Math.abs(ramp - 0.25) * 10;
+        if (!best || score > best.score) best = { c: { x: cx, z: cz, y: floor, yaw, length: L, width: Wd, height: 5 }, score };
+      }
+    }
+    if (best) island.caves.push(best.c);
+  }
 }
 
 /** Bilinear height sample at world (x, z). Used by AI ground-snapping and spawning. */
@@ -284,6 +467,13 @@ function scatterProps(t: TerrainData, island: IslandShape, rand: () => number): 
       const depth = d - beach;
       if (depth < 0 || nearSpawn(x, z)) continue;
       if (sampleHeight(t, x, z) < W + 0.5 || sampleSlope(t, x, z) > 0.4) continue; // ponds, outcrops
+      // Gen 2 biomes: bare snowy peaks, sparse highlands, open meadows, no trees in caves.
+      const biome = island.gen >= 2 ? island.biomeAt(x, z, sampleHeight(t, x, z)) : BIOME.forest;
+      if (biome === BIOME.cave || biome === BIOME.snow) continue;
+      const keep = hash2(cx * 3 + 1, cz * 7 - 2, cfg.seed + 55);
+      if (biome === BIOME.highland && keep > 0.42) continue;
+      if (biome === BIOME.meadow && keep > 0.16) continue;
+      if (island.gen >= 2 && island.caves.some((c) => caveClearZone(c, x, z))) continue;
       const edge = clamp(depth / 10, 0.15, 1);
       const clearing = (noise.fbm(x / 28, z / 28, 2) + 1) / 2 < 0.27;
       if (rand() > edge * (clearing ? 0.1 : 0.93)) continue;
@@ -294,7 +484,7 @@ function scatterProps(t: TerrainData, island: IslandShape, rand: () => number): 
       // mix is patchy rather than uniform. Uses hashes, not rand(), so the
       // positions — and therefore save-file resource ids — don't change.
       const last = out[out.length - 1]!;
-      const sp = pickSpecies(groves, x, z, depth, cfg.seed);
+      const sp = biomeSpecies(biome, pickSpecies(groves, x, z, depth, cfg.seed), keep);
       last.variant = sp * 4 + (last.variant % 4);
       last.scale *= SPECIES_SCALE[sp]!;
       trees.set(key(cx, cz), { x, z });
@@ -329,6 +519,20 @@ function scatterProps(t: TerrainData, island: IslandShape, rand: () => number): 
       }
       if (nearTrunk(x, z, 1.1)) continue;
       const wet = (noise.fbm(x / 60 + 7, z / 60 - 7, 3) + 1) / 2;
+      if (island.gen >= 2) {
+        const biome = island.biomeAt(x, z, sampleHeight(t, x, z));
+        if (biome === BIOME.cave || island.caves.some((c) => caveClearZone(c, x, z))) continue;
+        if (sampleSlope(t, x, z) > 0.5) continue;
+        // [rock, berry, fiber, grass, log, mushroom] cumulative thresholds per biome.
+        const th = UNDERGROWTH[biome] ?? UNDERGROWTH[BIOME.forest]!;
+        if (r < th[0]!) push('rock', x, z, 0.6 + rand() * 0.9);
+        else if (r < th[1]!) push('berry_bush', x, z, 0.7 + rand() * 0.6);
+        else if (r < th[2]!) push('fiber_plant', x, z, 0.7 + rand() * 0.6);
+        else if (r < th[3]!) push('grass_tuft', x, z, 0.7 + rand() * 0.6);
+        else if (r < th[4]!) push('log', x, z, 0.8 + rand() * 0.5);
+        else if (r < th[5]! && (wet > 0.45 || biome === BIOME.jungle)) push('mushroom', x, z, 0.7 + rand() * 0.6);
+        continue;
+      }
       if (r < 0.04) push('rock', x, z, 0.6 + rand() * 0.9);
       else if (r < 0.085) push('berry_bush', x, z, 0.7 + rand() * 0.6);
       else if (r < 0.15) push('fiber_plant', x, z, 0.7 + rand() * 0.6);
@@ -360,6 +564,28 @@ function scatterProps(t: TerrainData, island: IslandShape, rand: () => number): 
 export const TREE_HEIGHT_STRETCH = 1.25;
 /** Per-species size spread on top of the base scale. */
 const SPECIES_SCALE = [1, 1, 1, 1.1, 0.95, 1.05, 1];
+
+/** Undergrowth per biome: cumulative thresholds for rock, berry bush, fiber, grass, log, mushroom. */
+const UNDERGROWTH: Partial<Record<Biome, readonly number[]>> = {
+  [BIOME.forest]: [0.04, 0.085, 0.15, 0.4, 0.415, 0.43],
+  [BIOME.jungle]: [0.02, 0.08, 0.2, 0.5, 0.52, 0.57],
+  [BIOME.meadow]: [0.02, 0.1, 0.2, 0.7, 0.705, 0.71],
+  [BIOME.highland]: [0.1, 0.12, 0.16, 0.36, 0.37, 0.37],
+  [BIOME.snow]: [0.05, 0.05, 0.05, 0.06, 0.06, 0.06],
+};
+
+/** Biomes bias the species mix (gen 2); `roll` is a 0..1 hash. */
+function biomeSpecies(biome: Biome, picked: number, roll: number): number {
+  switch (biome) {
+    case BIOME.highland: return roll < 0.2 ? SPECIES.spruce : SPECIES.pine;
+    case BIOME.meadow: return roll < 0.09 ? SPECIES.birch : SPECIES.oak;
+    case BIOME.jungle: {
+      const k = (roll * 997) % 1;
+      return k < 0.4 ? SPECIES.oak : k < 0.62 ? SPECIES.palm : k < 0.75 ? SPECIES.redwood : picked;
+    }
+    default: return picked;
+  }
+}
 
 /**
  * Picks a species from three slow noise fields. Each species has a preferred
@@ -407,6 +633,7 @@ function scatterExtras(
   const taken: Array<{ x: number; z: number; r: number }> = [];
   const free = (x: number, z: number, r: number, trunkGap = 0.8): boolean =>
     Math.hypot(x - sp.x, z - sp.z) > cfg.spawnClearRadius + 2 && !nearTrunk(x, z, r + trunkGap) &&
+    !island.caves.some((c) => insideCave(c, x, z, r + 1.5) || caveClearZone(c, x, z)) &&
     taken.every((o) => Math.hypot(o.x - x, o.z - z) > o.r + r);
   const add = (kind: PropKind, x: number, z: number, scale: number, variant = Math.floor(rand() * 4), y?: number): void => {
     out.push({ kind, position: { x, y: y ?? sampleHeight(t, x, z), z }, rotationY: rand() * Math.PI * 2, scale, variant, chunk: chunkIndex(t, x, z) });
@@ -441,7 +668,9 @@ function scatterExtras(
   const minHigh = W + cfg.maxHeight * 0.45;
   grid(20, (cx, cz) => {
     const { d, beach } = island.zone(cx, cz);
-    if (d - beach < 10 || rand() > 0.7) return;
+    const chance = island.gen >= 2 ? (island.mountain(cx, cz) > 6 ? 0.85 : 0.35) : 0.7;
+    if (d - beach < 10 || rand() > chance) return;
+    if (island.caves.some((c) => insideCave(c, cx, cz, 6))) return;
     const high = sampleHeight(t, cx, cz) > minHigh;
     const n = 4 + Math.floor(rand() * 4);
     for (let k = 0; k < n; k++) {
@@ -454,6 +683,16 @@ function scatterExtras(
       add(kind, x, z, kind === 'rock' ? 1.1 + rand() * 0.4 : scale);
     }
   });
+
+  // Caves: crystals glitter at the back, and a vein of metal.
+  for (const c of island.caves) {
+    const ax = Math.sin(c.yaw), az = Math.cos(c.yaw);
+    const at = (s: number, w: number): [number, number] => [c.x + ax * s + az * w, c.z + az * s - ax * w];
+    for (const [s, w, kind, sc] of [[c.length / 2 - 2.2, -2.6, 'crystal', 1.2], [c.length / 2 - 1.8, 2.4, 'crystal', 1], [c.length / 2 - 4.5, 3.4, 'metal_rock', 1.1], [0.5, -3.6, 'crystal', 0.9]] as const) {
+      const [x, z] = at(s, w);
+      out.push({ kind, position: { x, y: c.y, z }, rotationY: rand() * Math.PI * 2, scale: sc, variant: Math.floor(rand() * 4), chunk: chunkIndex(t, x, z) });
+    }
+  }
 
   // Rare flowers, mostly in clearings.
   grid(5, (x, z) => {

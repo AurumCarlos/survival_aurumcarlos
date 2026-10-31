@@ -7,6 +7,8 @@ export interface DayNightConfig {
   /** Daily mean / swing around it (°C). */
   meanTempC: number;
   amplitudeC: number;
+  /** Day-to-day weather swing (± °C). */
+  weatherC?: number;
   /** Hour of the daily maximum (afternoon lag behind solar noon). */
   peakHour: number;
   seed: number;
@@ -15,8 +17,12 @@ export interface DayNightConfig {
 export const DEFAULT_DAY_NIGHT: DayNightConfig = {
   dayLengthSeconds: 20 * 60,
   startHour: 8,
-  meanTempC: 11,
-  amplitudeC: 15,
+  // A tropical island: mild nights (≈ 13–17 °C), warm afternoons (≈ 27–32 °C).
+  // Real cold is up in the mountains (EnvironmentSystem lowers the air
+  // temperature with altitude) and on rainy nights when you're soaked.
+  meanTempC: 22,
+  amplitudeC: 7,
+  weatherC: 4,
   peakHour: 15,
   seed: 1337,
 };
@@ -92,7 +98,7 @@ export class DayNightCycle {
   get ambientTempC(): number {
     const c = this.cfg;
     const daily = c.amplitudeC * Math.cos(((this.hour - c.peakHour) / 24) * Math.PI * 2);
-    const weather = this.weatherNoise.noise2(this.hoursElapsed / 24 / 3, 0.5) * 9; // ≈ −4.5..+4.5, slowly varying
+    const weather = this.weatherNoise.noise2(this.hoursElapsed / 24 / 3, 0.5) * 2 * (c.weatherC ?? 4.5); // slowly varying
     return c.meanTempC + daily + weather;
   }
 

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { AssetLoader } from '../assets/AssetLoader';
-import { HeatSource, PlayerControlled, ResourceC, Structure, SurvivorC, Transform } from '../components';
+import { Creature, HeatSource, PlayerControlled, ResourceC, Structure, SurvivorC, Transform } from '../components';
 import { World, type Entity } from '../core/ecs/World';
 import { EventBus } from '../core/EventBus';
 import { GameLoop } from '../core/GameLoop';
@@ -30,6 +30,8 @@ import { ViewModel } from '../render/ViewModel';
 import { ResourceVisualSystem, bindEntityVisuals, buildWorldVisuals, type BuildOptions } from '../render/WorldBuilder';
 import { AILodSystem } from '../systems/ai/AILodSystem';
 import { AISystem } from '../systems/ai/AISystem';
+import { ApexSystem } from '../systems/ai/ApexSystem';
+import { ApexAnimation } from '../render/ApexAnimation';
 import { FlowFieldService } from '../systems/ai/nav/FlowFieldService';
 import { NoiseBus } from '../systems/ai/NoiseBus';
 import { PerceptionSystem } from '../systems/ai/PerceptionSystem';
@@ -48,8 +50,8 @@ import { HUD } from '../ui/HUD';
 import { InventoryUI } from '../ui/InventoryUI';
 import type { MapConfig } from '../world/MapConfig';
 import type { TerrainBundle } from '../world/TerrainCodec';
-import { sampleHeight } from '../world/TerrainGenerator';
-import { populateResources, spawnInitialCreatures, type PopulatedWorld } from '../world/WorldPopulator';
+import { insideCave, sampleHeight } from '../world/TerrainGenerator';
+import { populateResources, spawnApexPredators, spawnInitialCreatures, type PopulatedWorld } from '../world/WorldPopulator';
 
 export interface SessionDeps {
   renderer: Renderer;
@@ -132,6 +134,8 @@ export class GameSession {
     this.populated = populateResources(world, d.bundle);
     if (d.snapshot) {
       this.player = applySnapshot(world, d.snapshot, this.populated, this.cycle).player;
+      // Saves from before crocodiles and bears: bring them in.
+      spawnApexPredators(world, d.bundle, d.map, [...world.query(Creature)].map((e) => world.require(e, Creature).species));
     } else {
       spawnInitialCreatures(world, d.bundle, d.map, this.populated.nav);
       // Castaway start: on the beach, facing the forest, the sea at your back.
@@ -144,6 +148,7 @@ export class GameSession {
     // ---- Physics ----------------------------------------------------------
     this.physics.addTerrain(terrain);
     this.physics.addWorldBounds(terrain.cfg.size);
+    this.physics.addCaves(terrain.caves ?? []);
     // Static trunk/rock colliders are added time-sliced in create().
     const feet = world.require(this.player, Transform).position;
     const body = this.physics.createPlayerBody(feet);
@@ -185,7 +190,17 @@ export class GameSession {
     events.on('structure:open', ({ entity }) => (this.openRequest = entity));
     this.structurePhysics = new StructurePhysics(world, this.physics, events);
 
-    const environment = new EnvironmentSystem(this.cycle, (feet) => this.buildings.shelterAt(feet));
+    const caves = terrain.caves ?? [];
+    const environment = new EnvironmentSystem(
+      this.cycle,
+      (feet) => {
+        // A cave is a natural shelter: dry, and out of the wind.
+        if (caves.some((c) => insideCave(c, feet.x, feet.z) && feet.y < c.y + c.height)) return { insulation: 0.55, roof: true };
+        return this.buildings.shelterAt(feet);
+      },
+      // Mountain air: −0.4 °C per metre above the lowlands (snowy peaks freeze at night).
+      { baseY: terrain.cfg.waterLevel + 6, lapseCPerM: 0.4 },
+    );
     this.loop = new GameLoop(world, { onRender: this.onRender });
     const noise = new NoiseBus();
     this.loop
@@ -212,6 +227,16 @@ export class GameSession {
         },
         paths: this.paths, cycle: this.cycle, survival: survival.manager, events,
       }))
+      .addSystem(new ApexSystem({
+        terrainHeight: (x, z) => sampleHeight(terrain, x, z),
+        groundHeight: (x, z) => {
+          const ground = sampleHeight(terrain, x, z);
+          const top = this.buildings.foundationTopAt(x, z);
+          return top !== null && top - ground < 1.2 ? Math.max(ground, top) : ground;
+        },
+        waterLevel: terrain.cfg.waterLevel, paths: this.paths, isNight: () => this.cycle.isNight,
+        survival: survival.manager, events, half: terrain.cfg.size / 2,
+      }))
       .addSystem(this.crafting)
       .addSystem(survival);
 
@@ -237,6 +262,7 @@ export class GameSession {
       .addSystem(new ResourceVisualSystem(built, this.events))
       .addSystem(new HitFlashSystem(this.events, this.world))
       .addSystem(new CreatureAnimationSystem())
+      .addSystem(new ApexAnimation(d.bundle.terrain.cfg.waterLevel))
       .addSystem(new BuildingVisuals(this.buildings, d.renderer.scene, this.events))
       .addSystem(viewModel);
     d.renderer.overlay = viewModel;

@@ -19,7 +19,15 @@ export class EnvironmentSystem implements System {
     readonly cycle: DayNightCycle,
     /** Extra shelter source (player-built houses). Returns insulation 0..1 and whether rain is kept off. */
     private readonly shelterAt?: (feet: { x: number; y: number; z: number }) => { insulation: number; roof: boolean },
+    /** Air gets colder with height: −lapse °C per metre above baseY (mountains). */
+    private readonly altitude: { baseY: number; lapseCPerM: number } | null = null,
   ) {}
+
+  /** Air temperature at a given height (°C). */
+  ambientAt(y: number): number {
+    const a = this.altitude;
+    return this.cycle.ambientTempC - (a ? Math.max(0, y - a.baseY) * a.lapseCPerM : 0);
+  }
 
   fixedUpdate(world: World, dt: number): void {
     this.cycle.advance(dt);
@@ -79,7 +87,7 @@ export class EnvironmentSystem implements System {
         roofed ||= built.roof;
       }
 
-      exp.ambientC = ambient;
+      exp.ambientC = this.altitude ? this.ambientAt(p.y) : ambient;
       exp.fireWarmthC = Math.min(warmth, this.maxFireWarmthC);
       exp.shelterInsulation = insulation;
       // Swimming soaks you regardless of shelter; rain only if unroofed.

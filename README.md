@@ -324,9 +324,53 @@ cost 300 ms per step; compound bodies cost 0.5 ms.
 - **Saves v4:** structures with their contents, fire state and smelting progress, and carcass
   species. v3 saves still load, and the bag grows from 8×5 to 10×6.
 
+## 10. Damage fix, mountains and caves, crocodile, bear, multiple saves
+
+- **"Constant damage for no reason":**
+  - The red screen flashed every time *any* animal noticed you (deer included), not when you were
+    hurt. It now flashes only on a real hit, with a message naming the attacker
+    (`player:damaged`).
+  - Wolves could bite through floors (attack range ignored height). Attacks now need the same
+    level (±1.6 m).
+  - The climate was temperate (3 °C mornings, −8 °C nights), so you slowly froze. The island is
+    now tropical (about 13–30 °C), and the cold is in the mountains: −0.4 °C per metre of altitude.
+  - When health drops from hunger, thirst, cold, bleeding or poisoning, a message says why.
+- **Generator v2** (new worlds; older saves keep regenerating the flat island they were made on,
+  via `MapConfig.gen`):
+  - **Mountains:** 1–3 craggy peaks (about 20 m on Small, 40 m on Medium, 55 m on Huge maps).
+  - **The beach stays flat all round:** the relief fades in 8–34 m inland of it.
+  - **Biomes:** beach, forest, jungle (oaks, palms, redwoods, mushrooms), meadow (open grass,
+    berries), highlands (pines, stone, ore) and snowy peaks (bare, cold, crystals). Each has its own
+    ground colour, trees and undergrowth.
+  - **Caves:** one per mountain, a flat chamber carved into the flank under a rock dome with
+    stalactites, crystals, a metal vein and bones. A graded ramp leads to the mouth. The roof is
+    solid, so you can walk over it. Inside, it's dry and sheltered.
+- **Crocodile** (`ApexModels.ts`, `ApexSystem.ts`, `ApexAnimation.ts`): 1 per 128 m of map edge.
+  - Body: about 5 m long, with a 6-segment tail, a hinged jaw with interlocking teeth, raised eyes
+    with slit pupils, osteoderm rows and sprawled legs with claws.
+  - It patrols the lagoon and lurks with only its eyes above water. It stalks swimmers or anyone at
+    the water's edge, then lunges, snaps and shakes its head.
+  - It follows you a few metres up the beach, never far, and slides back.
+  - Animation: swimming is a travelling wave down the tail with the legs folded back; on land it
+    high-walks with an S-bend of the spine.
+- **Bear:** one asleep at the back of every cave.
+  - Walk in, come close, or hit it, and it wakes, rears up and roars (about 2 s to react), then
+    charges at a gallop and swipes.
+  - It gives up about 38 m from its cave and goes home to sleep. Some nights it wanders near the
+    entrance.
+  - Rig: spine pivoting at the hips, 2-joint legs, jaw, and shaggy fur. Animations: walk, gallop,
+    sleep, rear and roar, swipe.
+  - Drops pelt, prime meat and hide; the crocodile drops keratin.
+- **Several saves:**
+  - Every world has its own slot and name (set when you create it).
+  - Main menu → *Load game* lists all worlds, where you can load, rename, duplicate, export to a
+    file, delete (confirmed), or import a file.
+  - Pause menu: *Save game* or *Save as new…*.
+  - Dying deletes only that world's save. The save written on page close goes to the right world.
+
 ## Verification
 
-- `npm test`: 29 survival + 46 refactor + 52 island/building + 14 gameplay + 41 crafting/stations + 29 world/physics checks (real cannon-es), all passing. They cover:
+- `npm test`: 29 survival + 46 refactor + 52 island/building + 14 gameplay + 41 crafting/stations + 31 wildlife/terrain/saves + 29 world/physics checks (real cannon-es), all passing. They cover:
   - flow fields: around a wall through a gap, and 40 random trips across the real forest with
     zero entries into blocked cells;
   - LOD: dormant creatures freeze and wake in place;

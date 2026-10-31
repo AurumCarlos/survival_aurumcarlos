@@ -1,10 +1,16 @@
-import { DEFAULT_TERRAIN, type TerrainConfig } from './TerrainGenerator';
+import { DEFAULT_TERRAIN, GENERATOR_VERSION, type TerrainConfig } from './TerrainGenerator';
 
 /** What the player chooses on the configuration screen. Persisted in saves. */
 export interface MapConfig {
   seed: number;
   /** Edge length in metres (square map). */
   size: number;
+  /**
+   * Terrain generator version (see TerrainGenerator.GENERATOR_VERSION). Saves
+   * from before mountains and caves have none = 1, and regenerate the same
+   * flat island they were made on.
+   */
+  gen?: number;
 }
 
 export const MAP_LIMITS = { minSize: 128, maxSize: 512, step: 32 } as const;
@@ -24,7 +30,7 @@ export class MapConfigError extends Error {}
  * size so every chunk is complete; non-numeric input is an error rather than
  * a silent default, so the form can show it.
  */
-export function parseMapConfig(raw: { seed?: unknown; size?: unknown }): MapConfig {
+export function parseMapConfig(raw: { seed?: unknown; size?: unknown; gen?: unknown }): MapConfig {
   const size = Number(raw.size);
   if (!Number.isFinite(size)) throw new MapConfigError('Map size must be a number.');
   const snapped = Math.round(size / MAP_LIMITS.step) * MAP_LIMITS.step;
@@ -39,7 +45,8 @@ export function parseMapConfig(raw: { seed?: unknown; size?: unknown }): MapConf
     // Text seeds ("my world") hash to a number, Minecraft-style.
     seed = hashString(String(raw.seed));
   }
-  return { seed, size: clamped };
+  const gen = Number(raw.gen);
+  return { seed, size: clamped, ...(Number.isInteger(gen) && gen >= 2 && gen <= GENERATOR_VERSION ? { gen } : {}) };
 }
 
 export function toTerrainConfig(m: MapConfig): TerrainConfig {
@@ -50,6 +57,9 @@ export function toTerrainConfig(m: MapConfig): TerrainConfig {
     // One quad per 1.33 m at every map size (24 quads per 32 m chunk).
     resolution: m.size * 0.75,
     baseFrequency: DEFAULT_TERRAIN.baseFrequency,
+    gen: m.gen ?? 1,
+    // Mountains: gen 2 lowlands are also a bit hillier.
+    maxHeight: (m.gen ?? 1) >= 2 ? 8 : DEFAULT_TERRAIN.maxHeight,
   };
 }
 
