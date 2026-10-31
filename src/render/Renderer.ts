@@ -4,6 +4,7 @@ import type { ViewportTarget } from '../core/Lifecycle';
 import type { DayNightCycle } from '../systems/DayNightCycle';
 import { Sky } from 'three/addons/objects/Sky.js';
 import { shaderTime, skyAmbient } from './Materials';
+import type { PropDistances } from './PropBatches';
 import { Celestial } from './Celestial';
 import { Rain } from './Rain';
 import { DEFAULT_GRAPHICS, type GraphicsSettings } from '../data/settings';
@@ -163,14 +164,14 @@ export class Renderer implements ViewportTarget {
    * nearest trees get the detailed mesh (the player's setting; in Auto it is
    * scaled down on the cheaper tiers).
    */
-  get propDistances(): { view: number; detailedTrees: number; smallProps: number } {
-    const view = this.viewDistance * (this.graphics.viewDistance / 100);
+  get propDistances(): PropDistances {
+    const view = this.viewDistance;
     const n = this.graphics.detailedTrees;
     const auto = this.graphics.quality === 'auto';
     switch (this.tier) {
-      case 2: return { view, detailedTrees: n, smallProps: 50 };
-      case 1: return { view: Math.min(view, 120), detailedTrees: auto ? Math.round(n * 0.66) : n, smallProps: 35 };
-      default: return { view: Math.min(view, 95), detailedTrees: auto ? Math.round(n * 0.4) : n, smallProps: 22 };
+      case 2: return { view, detailedTrees: n, smallProps: 50, lowTrees: 230, bigProps: 220 };
+      case 1: return { view, detailedTrees: auto ? Math.round(n * 0.66) : n, smallProps: 35, lowTrees: 170, bigProps: 160 };
+      default: return { view, detailedTrees: auto ? Math.round(n * 0.4) : n, smallProps: 22, lowTrees: 120, bigProps: 120 };
     }
   }
 
@@ -249,9 +250,16 @@ export class Renderer implements ViewportTarget {
     this.tmpColor.copy(HAZE_NIGHT).lerp(HAZE_DAY, light).lerp(HAZE_DUSK, duskness * 0.55 * light);
     this.tmpColor.lerp(this.tmpColor2.copy(HAZE_RAIN).multiplyScalar(0.12 + 0.88 * light), rain * 0.8); // grey, darker rain haze
     this.fog.color.copy(this.tmpColor);
-    // Night closes in (and matches the AI's shorter sight range); rain shortens the view too.
-    this.fog.far = (60 + 100 * light) * (1 - 0.4 * rain);
+    // The view distance setting is the daylight fog distance; night closes in
+    // (to ~40 %, matching the AI's shorter sight range) and rain shortens it too.
+    const range = this.graphics.viewRange;
+    this.fog.far = range * (0.375 + 0.625 * light) * (1 - 0.4 * rain);
     this.fog.near = this.fog.far * 0.12;
+    const far = range + 150;
+    if (this.camera.far !== far) {
+      this.camera.far = far;
+      this.camera.updateProjectionMatrix();
+    }
     this.sky.material.uniforms['uRain']!.value = rain;
     this.sky.material.uniforms['uDay']!.value = light;
 

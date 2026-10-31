@@ -54,7 +54,7 @@ export class FlowFieldService implements PathProvider {
 
   constructor(readonly grid: NavGrid, opts: FlowFieldOptions = {}) {
     this.radii = opts.radii ?? [32, 64, 112];
-    this.cacheSize = opts.cacheSize ?? 48;
+    this.cacheSize = opts.cacheSize ?? 64;
     this.maxBuilds = opts.maxBuildsPerTick ?? 3;
     this.maxAge = opts.maxAgeTicks ?? 600;
   }

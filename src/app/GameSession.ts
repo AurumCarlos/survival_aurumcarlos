@@ -53,6 +53,7 @@ import { bedSpawnPoint, chooseBed, dropBelongings, revive } from '../systems/Res
 import { StructureInteraction } from '../systems/StructureInteraction';
 import { TEST_BAG, giveTestKit } from '../systems/TestKit';
 import { HUD } from '../ui/HUD';
+import { MapView } from '../ui/MapView';
 import { InventoryUI } from '../ui/InventoryUI';
 import type { MapConfig } from '../world/MapConfig';
 import type { TerrainBundle } from '../world/TerrainCodec';
@@ -100,6 +101,7 @@ export class GameSession {
   private readonly interaction: InteractionSystem;
   private readonly crafting: CraftingSystem;
   private disposed = false;
+  private readonly map: MapView;
   private spectatorBadge: HTMLElement | null = null;
   private fireTime = 0;
   readonly buildings: BuildingGrid;
@@ -118,14 +120,17 @@ export class GameSession {
   static async create(d: SessionDeps): Promise<GameSession> {
     const s = new GameSession(d);
     try {
-      const sliceOpts: { signal?: AbortSignal; onProgress: (f: number) => void } = {
-        onProgress: (f) => d.onProgress?.(0.72 + f * 0.08, 'Placing obstacles…'),
+      const sliceOpts: { signal?: AbortSignal; onProgress: (f: number) => void; budgetMs: number } = {
+        onProgress: (f) => d.onProgress?.(0.72 + f * 0.08, 'Placing obstacles…'), budgetMs: 40,
       };
       if (d.signal) sliceOpts.signal = d.signal;
       await s.physics.addStaticProps(d.bundle.terrain, sliceOpts);
       s.syncPropObstacles();
       d.onProgress?.(0.8, 'Planting trees…');
-      const opts: BuildOptions = { onProgress: (f) => d.onProgress?.(0.8 + f * 0.2, 'Planting trees…') };
+      const feet = s.world.require(s.player, Transform).position;
+      const opts: BuildOptions = {
+        onProgress: (f) => d.onProgress?.(0.8 + f * 0.2, 'Planting trees…'), renderer: d.renderer.renderer, focus: { x: feet.x, z: feet.z },
+      };
       if (d.signal) opts.signal = d.signal;
       const built = await buildWorldVisuals(d.renderer.scene, d.bundle.terrain, s.populated, opts);
       s.finish(built);
@@ -315,6 +320,7 @@ export class GameSession {
     new SleepSystem(world, events, this.cycle, [this.stations, environment, this.interaction, this.crafting, survival]);
 
     this.hud = new HUD(d.uiContainer, events, this.cycle, survival.manager, () => d.renderer.resolutionScale);
+    this.map = new MapView(d.uiContainer, terrain, this.buildings);
     if (d.map.spectator) {
       d.uiContainer.classList.add('spectator');
       this.spectatorBadge = document.createElement('div');
@@ -337,7 +343,7 @@ export class GameSession {
     const viewModel = new ViewModel(d.renderer);
     this.loop
       .addSystem(renderSync)
-      .addSystem(new CullingSystem(d.renderer.camera, built.chunks, built.props, () => d.renderer.propDistances))
+      .addSystem(new CullingSystem(d.renderer.camera, built.chunks, built.tiles, built.props, () => d.renderer.propDistances))
       .addSystem(new ResourceVisualSystem(built, this.events))
       .addSystem(new HitFlashSystem(this.events, this.world))
       .addSystem(new CreatureAnimationSystem())
@@ -379,6 +385,11 @@ export class GameSession {
   }
 
   // ---- Public API used by App ----------------------------------------------
+
+  /** M: the full map. */
+  toggleMap(open?: boolean): void {
+    this.map.toggle(open);
+  }
 
   get isInventoryOpen(): boolean {
     return this.inventory.isOpen;
@@ -438,6 +449,7 @@ export class GameSession {
     this.buildingNav.dispose();
     this.structurePhysics?.dispose();
     this.hud.dispose();
+    this.map.dispose();
     this.inventory.dispose();
     this.spectatorBadge?.remove();
     this.d.uiContainer.classList.remove('spectator');
@@ -454,6 +466,7 @@ export class GameSession {
     if (this.d.sound && !this.loop.isPaused) this.d.sound.update(dt, this.audioState(dt));
     this.inventory.frame();
     if (!this.loop.isPaused) this.announceBiome(dt);
+    this.map.update(this.world, this.player, dt);
     const prompt = this.building.prompt() ?? this.structures.prompt(this.world) ?? this.hud.promptFor(this.world, this.interaction.focused, this.player);
     this.hud.update(this.world, this.player, dt, this.loop, prompt, this.crafting.progress(this.player));
     this.d.renderer.render();

@@ -71,12 +71,13 @@ const LAYER_TILE = [3.2, 2.6, 2.8, 5.5, 6.0];
  * memory on Intel GPUs.
  */
 export function createTerrainMaterial(): THREE.MeshLambertMaterial {
-  const { albedo, normal } = terrainTextures();
+  const { albedo, normal, means } = terrainTextures();
   const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
   mat.onBeforeCompile = (shader) => {
     shader.uniforms['uAlbedo'] = { value: albedo };
     shader.uniforms['uNormalArr'] = { value: normal };
     shader.uniforms['uTile'] = { value: LAYER_TILE.map((m) => 1 / m) };
+    shader.uniforms['uMean'] = { value: means };
     shader.uniforms['uSkyAmbient'] = skyAmbient;
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
@@ -95,6 +96,7 @@ export function createTerrainMaterial(): THREE.MeshLambertMaterial {
         uniform highp sampler2DArray uAlbedo;
         uniform highp sampler2DArray uNormalArr;
         uniform float uTile[5];
+        uniform vec3 uMean[5];
         uniform vec3 uSkyAmbient;
         varying vec4 vLayA;
         varying float vLayB;
@@ -104,11 +106,18 @@ export function createTerrainMaterial(): THREE.MeshLambertMaterial {
         // One planar sample per layer; a low-frequency mask shifts the UVs
         // and the brightness to hide the tiling. Returns albedo (a = height)
         // and the world-space normal.
+        // Distance LOD (see the map_fragment block): tNear is 1 where texture
+        // detail is visible, 0 far away; tBump the same for normal-map relief.
+        float tNear;
+        float tBump;
         vec4 tPlanar(float layer, float tile, float mask, vec3 N, out vec3 n) {
           vec2 uv = vTPos.xz * tile + vec2(mask * 0.11, mask * 0.07);
           vec4 a = texture(uAlbedo, vec3(uv, layer));
-          vec3 t = texture(uNormalArr, vec3(uv, layer)).xyz * 2.0 - 1.0;
-          n = normalize(vec3(t.x + N.x, abs(t.z) * N.y, t.y + N.z));
+          n = N;
+          if (tBump > 0.0) {
+            vec3 t = texture(uNormalArr, vec3(uv, layer)).xyz * 2.0 - 1.0;
+            n = normalize(mix(N, normalize(vec3(t.x + N.x, abs(t.z) * N.y, t.y + N.z)), tBump));
+          }
           a.rgb *= 0.88 + mask * 0.24;
           return a;
         }
@@ -116,23 +125,34 @@ export function createTerrainMaterial(): THREE.MeshLambertMaterial {
         vec4 tRock(float tile, vec3 N, out vec3 n) {
           vec3 bw = tBlendWeights(N, 4.0);
           vec4 ax = texture(uAlbedo, vec3(vTPos.zy * tile, 3.0)), ay = texture(uAlbedo, vec3(vTPos.xz * tile, 3.0)), az = texture(uAlbedo, vec3(vTPos.xy * tile, 3.0));
-          vec3 nx = texture(uNormalArr, vec3(vTPos.zy * tile, 3.0)).xyz, ny = texture(uNormalArr, vec3(vTPos.xz * tile, 3.0)).xyz, nz = texture(uNormalArr, vec3(vTPos.xy * tile, 3.0)).xyz;
-          n = tWhiteout(nx * 2.0 - 1.0, ny * 2.0 - 1.0, nz * 2.0 - 1.0, N, bw);
+          n = N;
+          if (tBump > 0.0) {
+            vec3 nx = texture(uNormalArr, vec3(vTPos.zy * tile, 3.0)).xyz, ny = texture(uNormalArr, vec3(vTPos.xz * tile, 3.0)).xyz, nz = texture(uNormalArr, vec3(vTPos.xy * tile, 3.0)).xyz;
+            n = normalize(mix(N, tWhiteout(nx * 2.0 - 1.0, ny * 2.0 - 1.0, nz * 2.0 - 1.0, N, bw), tBump));
+          }
           return ax * bw.x + ay * bw.y + az * bw.z;
         }
         vec3 tTerrainN;`)
       .replace('#include <map_fragment>', `
         {
           vec3 N = normalize(vTNrm);
-          float mask = smoothstep(0.3, 0.7, texture(uAlbedo, vec3(vTPos.xz * 0.011, 1.0)).a);
+          // Past ~160 m the layers' mipmaps are just their average colour, and
+          // past ~80 m normal-map relief is sub-pixel: skip those texture reads
+          // (most of the screen with a long view) and fade in so nothing pops.
+          float dist = distance(vTPos, cameraPosition);
+          tNear = 1.0 - smoothstep(100.0, 160.0, dist);
+          tBump = 1.0 - smoothstep(30.0, 80.0, dist);
           float w0 = vLayA.x, w1 = vLayA.y, w2 = vLayA.z, w3 = vLayA.w, w4 = vLayB;
-          vec4 a0 = vec4(0.0), a1 = vec4(0.0), a2 = vec4(0.0), a3 = vec4(0.0), a4 = vec4(0.0);
+          vec4 a0 = vec4(uMean[0], 0.5), a1 = vec4(uMean[1], 0.5), a2 = vec4(uMean[2], 0.5), a3 = vec4(uMean[3], 0.5), a4 = vec4(uMean[4], 0.5);
           vec3 n0 = N, n1 = N, n2 = N, n3 = N, n4 = N;
-          if (w0 > 0.002) a0 = tPlanar(0.0, uTile[0], mask, N, n0);
-          if (w1 > 0.002) a1 = tPlanar(1.0, uTile[1], mask, N, n1);
-          if (w2 > 0.002) a2 = tPlanar(2.0, uTile[2], mask, N, n2);
-          if (w3 > 0.002) a3 = tRock(uTile[3], N, n3);
-          if (w4 > 0.002) a4 = tPlanar(4.0, uTile[4], mask, N, n4);
+          if (tNear > 0.0) {
+            float mask = smoothstep(0.3, 0.7, texture(uAlbedo, vec3(vTPos.xz * 0.011, 1.0)).a);
+            if (w0 > 0.002) a0 = mix(a0, tPlanar(0.0, uTile[0], mask, N, n0), tNear);
+            if (w1 > 0.002) a1 = mix(a1, tPlanar(1.0, uTile[1], mask, N, n1), tNear);
+            if (w2 > 0.002) a2 = mix(a2, tPlanar(2.0, uTile[2], mask, N, n2), tNear);
+            if (w3 > 0.002) a3 = mix(a3, tRock(uTile[3], N, n3), tNear);
+            if (w4 > 0.002) a4 = mix(a4, tPlanar(4.0, uTile[4], mask, N, n4), tNear);
+          }
           // Height blend: the taller layer (pebbles, grass clumps) pokes through at transitions.
           float h0 = a0.a + w0, h1 = a1.a + w1, h2 = a2.a + w2, h3 = a3.a + w3, h4 = a4.a + w4;
           float hmax = max(max(max(h0, h1), max(h2, h3)), h4) - 0.25;
@@ -147,7 +167,7 @@ export function createTerrainMaterial(): THREE.MeshLambertMaterial {
       .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
         reflectedLight.indirectDiffuse += diffuseColor.rgb * uSkyAmbient;`);
   };
-  mat.customProgramCacheKey = () => 'terrain-v2';
+  mat.customProgramCacheKey = () => 'terrain-v3';
   return mat;
 }
 

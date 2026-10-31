@@ -14,7 +14,12 @@ import { ECOLOGY, EcologySystem, ecoState } from '../src/systems/ai/Ecology';
 import { straightLinePaths } from '../src/systems/ai/nav/FlowFieldService';
 import { DayNightCycle, DEFAULT_DAY_NIGHT } from '../src/systems/DayNightCycle';
 import { SurvivalStatusManager } from '../src/systems/SurvivalStatusManager';
-import { creatureBudget, parseMapConfig } from '../src/world/MapConfig';
+import { creatureBudget, parseMapConfig, toTerrainConfig } from '../src/world/MapConfig';
+import { spawnPlayer } from '../src/entities/factories';
+import { captureSnapshot, parseSnapshot, serializeSnapshot } from '../src/persistence/WorldSnapshot';
+import { buildNavGrid } from '../src/systems/ai/nav/NavGrid';
+import { generateTerrain } from '../src/world/TerrainGenerator';
+import { populateResources } from '../src/world/WorldPopulator';
 import { runEcology } from './simulate-ecology';
 
 declare const process: { exit(code: number): never };
@@ -152,6 +157,31 @@ console.log('\n── Safety nets and breeding ──');
   ecoState(world, doe).food = 0.9;
   for (let t = 0; t < BREED_TUNING.interval * 3; t++) breed.fixedUpdate(world, 1);
   check('a hungry doe doesn’t conceive; a well-fed one does', !hungryPregnant && breedState(world, doe).pregnant !== undefined);
+}
+
+console.log('\n── Saves ──');
+{
+  const map = parseMapConfig({ size: 128, seed: 5, gen: 4 });
+  const t = generateTerrain(toTerrainConfig(map));
+  const world = new World();
+  const pop = populateResources(world, { terrain: t, nav: buildNavGrid(t) });
+  spawnPlayer(world, { x: 0, y: 2, z: 0 });
+  const states = ['graze', 'feed', 'stalk'] as const;
+  states.forEach((st, i) => {
+    const e = spawnCreature(world, i === 2 ? 'wolf' : 'deer', { x: 10 + i * 3, y: 1, z: 0 }, 40 + i);
+    world.require(e, AIBrain).blackboard.state = st;
+    ecoState(world, e).food = 0.42;
+  });
+  const snap = { ...captureSnapshot(world, { map, cycle: new DayNightCycle(DEFAULT_DAY_NIGHT), populated: pop }), savedAt: 1, summary: { day: 1, secondsSurvived: 1 } };
+  let ok = true, why = '';
+  try {
+    const back = parseSnapshot(serializeSnapshot(snap));
+    ok = states.every((st) => back.creatures.some((c) => c.blackboard.state === st && c.blackboard.eco?.food === 0.42));
+  } catch (e) {
+    ok = false;
+    why = String(e);
+  }
+  check('a save with animals grazing, eating and stalking loads back (with their hunger)', ok, why);
 }
 
 console.log('\n── A real island over 10 days ──');

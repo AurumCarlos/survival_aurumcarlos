@@ -85,12 +85,12 @@ export class PhysicsWorld {
 
   /**
    * Colliders for every solid prop, merged into ONE compound static body per
-   * terrain chunk (each trunk/boulder is a shape with an offset).
+   * 128 m tile of terrain (each trunk/boulder is a shape with an offset).
    *
    * Why not one body per tree: cannon-es keeps a collision matrix with an
    * entry for every *pair* of bodies and clears it every step, so the step
    * cost grows with bodies². 1,400 separate trunks cost ~14–34 ms per step;
-   * a dense 512 m island has 6,000+. As ~60 compound bodies the matrix is
+   * a dense 512 m island has 6,000+. As ~16–64 compound bodies the matrix is
    * tiny, and narrowphase still only looks at the chunk(s) the player is in,
    * where shapes far from the player are rejected by a bounding-sphere test.
    *
@@ -98,11 +98,16 @@ export class PhysicsWorld {
    * thinks it's blocked" and "physics thinks it's solid" can never disagree.
    */
   async addStaticProps(t: TerrainData, opts: Parameters<typeof timeSliced>[2] = {}): Promise<void> {
+    // Grouped per 4 × 4 chunks (128 m): a 1000 m island has ~900 chunks, and
+    // the pair matrix of 900 bodies alone cost ~3 ms a step; 64 bigger
+    // compounds are cheap, and far shapes still fail the bounding-sphere test.
     const byChunk = new Map<number, number[]>();
+    const cps = t.chunksPerSide;
     t.props.forEach((p, i) => {
       if (obstacleRadius(p) === 0) return;
-      let list = byChunk.get(p.chunk);
-      if (!list) byChunk.set(p.chunk, (list = []));
+      const group = Math.floor((p.chunk % cps) / 4) + Math.floor(Math.floor(p.chunk / cps) / 4) * 1024;
+      let list = byChunk.get(group);
+      if (!list) byChunk.set(group, (list = []));
       list.push(i);
     });
     await timeSliced([...byChunk.values()], (indices) => {
@@ -126,9 +131,17 @@ export class PhysicsWorld {
           shape = new CANNON.Sphere(r);
           offset = new CANNON.Vec3(p.position.x - o.x, p.position.y + r * 0.4 - o.y, p.position.z - o.z);
         }
-        body.addShape(shape, offset);
+        // Not body.addShape(): it recomputes the body's mass and bounding
+        // radius over every shape each time — quadratic, 12 s for a 1000 m map.
+        body.shapes.push(shape);
+        body.shapeOffsets.push(offset);
+        body.shapeOrientations.push(new CANNON.Quaternion());
+        shape.body = body;
         this.propShapes.set(i, { body, shape, offset, active: true });
       }
+      body.updateMassProperties();
+      body.updateBoundingRadius();
+      body.aabbNeedsUpdate = true;
       this.world.addBody(body);
       this.staticPropBodies++;
     }, opts);

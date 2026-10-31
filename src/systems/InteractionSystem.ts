@@ -149,7 +149,16 @@ export class InteractionSystem implements System {
     events.on('player:action-impact', ({ action }) => {
       if (action === 'harvest') this.pendingImpacts++;
     });
+    events.on('resource:depleted', ({ entity }) => this.depleted.add(entity));
   }
+
+  /**
+   * Resources waiting to regrow (or, for carcasses, to be removed). Only these
+   * are ticked: a 1000 m island has ~50,000 resources and scanning them all
+   * 60 times a second cost more than everything else together.
+   */
+  private readonly depleted = new Set<Entity>();
+  private scanned = false;
 
   update(world: World): void {
     const player = world.first(PlayerControlled, SurvivorC, Transform);
@@ -215,12 +224,24 @@ export class InteractionSystem implements System {
   }
 
   fixedUpdate(world: World, dt: number): void {
-    for (const e of world.query(ResourceC)) {
-      const r = world.require(e, ResourceC);
-      if (r.hitPoints > 0 || r.infinite) continue;
+    if (!this.scanned) {
+      // Once: whatever a loaded save left depleted.
+      this.scanned = true;
+      for (const e of world.query(ResourceC)) {
+        const r = world.require(e, ResourceC);
+        if (r.hitPoints <= 0 && !r.infinite) this.depleted.add(e);
+      }
+    }
+    for (const e of this.depleted) {
+      const r = world.get(e, ResourceC);
+      if (!r || r.infinite || r.hitPoints > 0) {
+        this.depleted.delete(e);
+        continue;
+      }
       if (r.respawnSeconds === Number.POSITIVE_INFINITY) {
         world.destroy(e); // carcasses vanish when emptied
         this.index.remove(e);
+        this.depleted.delete(e);
         continue;
       }
       r.respawnTimer -= dt;
@@ -228,6 +249,7 @@ export class InteractionSystem implements System {
       // A tree or boulder must not grow back around the player; wait until they step away.
       if (r.requiredTool && this.playerNear(world, r.position.x, r.position.z, 1.6)) continue;
       r.hitPoints = r.maxHitPoints;
+      this.depleted.delete(e);
       this.events.emit('resource:regrown', { entity: e });
     }
   }

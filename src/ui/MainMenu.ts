@@ -185,7 +185,7 @@ export class MainMenu {
               : `<button data-act="saveas" ${m.busy ? 'disabled' : ''}>Save as new…<small>Keeps this world in a separate save from now on</small></button>`}
             <button data-act="settings">Settings</button>
             <button data-act="quit" ${m.busy ? 'disabled' : ''}>Save &amp; quit to menu</button>
-            <p class="keys">WASD move · Shift sprint · C crouch · E harvest · I inventory · LMB swing · RMB throw · B build · 1–6 / wheel hotbar</p>
+            <p class="keys">WASD move · Shift sprint · C crouch · E harvest · I inventory · LMB swing · RMB throw · B build · M map · 1–6 / wheel hotbar</p>
           </div>`;
         break;
       case 'gameover':
@@ -373,7 +373,13 @@ export class MainMenu {
       const raw = this.root.querySelector<HTMLInputElement>('input[name=size]')?.value ?? '';
       if (raw.trim() === '') throw new MapConfigError('Enter a map size.');
       const cfg = parseMapConfig({ size: raw, seed: this.form.seed.trim(), gen: GENERATOR_VERSION, testMode: this.form.testMode, spectator: this.form.spectator });
-      if (cfg.size !== Number(raw)) this.toast(`Map size adjusted to ${cfg.size} m (multiples of ${MAP_LIMITS.step}, ${MAP_LIMITS.minSize}–${MAP_LIMITS.maxSize}).`);
+      if (cfg.size !== Number(raw)) {
+        // Show it in the form too, not only in a toast that's easy to miss.
+        this.form.size = cfg.size;
+        const input = this.root.querySelector<HTMLInputElement>('input[name=size]');
+        if (input) input.value = String(cfg.size);
+        this.toast(`Map size adjusted to ${cfg.size} m (multiples of ${MAP_LIMITS.step}, ${MAP_LIMITS.minSize}–${MAP_LIMITS.maxSize}).`);
+      }
       this.form.size = cfg.size;
       this.h.onStart(cfg, this.form.name.trim() || `${cfg.spectator ? 'Spectator ' : cfg.testMode ? 'Test ' : ''}Island ${cfg.seed}`);
     } catch (e) {

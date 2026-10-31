@@ -7,6 +7,7 @@ import { Lifecycle } from '../core/Lifecycle';
 import { SaveStore, cleanName, newSlotId, type SlotInfo } from '../persistence/SaveStore';
 import type { WorldSnapshot } from '../persistence/WorldSnapshot';
 import { Renderer } from '../render/Renderer';
+import { prepareTerrainTextures } from '../render/Textures';
 import { SoundEngine } from '../audio/SoundEngine';
 import { MainMenu, type MenuModel } from '../ui/MainMenu';
 import { toTerrainConfig, type MapConfig } from '../world/MapConfig';
@@ -128,6 +129,8 @@ export class App {
 
     this.renderer.clear();
     this.menu.render('menu', this.model);
+    // Bake the terrain textures in the background while the player reads the menu.
+    prepareTerrainTextures(() => new Worker(new URL('../render/textures.worker.ts', import.meta.url), { type: 'module' }));
 
     // Optional models load in the background while the player reads the menu.
     this.assetsReady = this.assets.loadAll(ASSET_MANIFEST).catch((e: unknown) => console.warn(e));
@@ -160,6 +163,7 @@ export class App {
     this.input.invertY = c.invertY;
     this.sound.setVolumes({ master: c.masterVolume / 100, ambience: c.ambienceVolume / 100, effects: c.effectsVolume / 100 });
     this.container.classList.toggle('hide-fps', !this.settings.graphics.showFps);
+    this.container.classList.toggle('hide-minimap', !this.settings.graphics.showMinimap);
     saveSettings(this.settings);
   }
 
@@ -421,6 +425,7 @@ export class App {
       const box = s.takeOpenRequest();
       if (box !== null && !s.isInventoryOpen) this.toggleInventory(s, true, box);
       else if (this.input.wasPressedRaw('inventory')) this.toggleInventory(s, !s.isInventoryOpen);
+      else if (this.input.wasPressedRaw('map')) s.toggleMap();
       else if (this.input.wasPressedRaw('pause')) {
         // Esc normally arrives as a pointer-lock exit; this path covers playing
         // without lock (lock refused) and closing the inventory with Esc.

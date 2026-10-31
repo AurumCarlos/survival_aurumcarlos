@@ -174,6 +174,7 @@ export class EcologySystem implements System {
   readonly name = 'ecology';
   readonly census: Census = { deer: 0, wolf: 0, boar: 0 };
   private newcomerTimer = 0;
+  private scanned = false;
   private readonly rng: () => number;
 
   constructor(private readonly s: EcologyServices) {
@@ -205,13 +206,19 @@ export class EcologySystem implements System {
     for (const e of starved) killCreature(world, e, this.s.resources, this.s.events, 'starvation');
     Object.assign(this.census, census);
 
-    // Carcasses rot; emptied ones (eaten or butchered) go at once.
+    // Carcasses rot; emptied ones (eaten or butchered) go at once. Every
+    // carcass carries a Lifetime (killCreature), so only those are visited.
+    if (!this.scanned) {
+      this.scanned = true; // carcasses from a save: give them one
+      for (const e of world.query(ResourceC)) {
+        if (world.require(e, ResourceC).kind === 'carcass' && !world.has(e, Lifetime)) world.add(e, Lifetime, { remaining: ECOLOGY.carcassRot });
+      }
+    }
     const gone: Entity[] = [];
-    for (const e of world.query(ResourceC)) {
+    for (const e of world.query(Lifetime, ResourceC)) {
       const r = world.require(e, ResourceC);
       if (r.kind !== 'carcass') continue;
-      let life = world.get(e, Lifetime);
-      if (!life) world.add(e, Lifetime, (life = { remaining: ECOLOGY.carcassRot })); // carcass from a save
+      const life = world.require(e, Lifetime);
       life.remaining -= dt;
       if (r.hitPoints <= 0 || life.remaining <= 0) gone.push(e);
     }

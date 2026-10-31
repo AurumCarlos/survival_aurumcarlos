@@ -17,13 +17,14 @@ export interface MapConfig {
   spectator?: boolean;
 }
 
-export const MAP_LIMITS = { minSize: 128, maxSize: 512, step: 32 } as const;
+export const MAP_LIMITS = { minSize: 128, maxSize: 1024, step: 32 } as const;
 
 export const MAP_PRESETS: ReadonlyArray<{ label: string; size: number; hint: string }> = [
   { label: 'Small', size: 128, hint: 'Quick games, tight resources' },
   { label: 'Medium', size: 256, hint: 'Recommended' },
   { label: 'Large', size: 384, hint: 'More to explore' },
-  { label: 'Huge', size: 512, hint: 'Longest generation time' },
+  { label: 'Huge', size: 512, hint: 'Long generation' },
+  { label: 'Giant', size: 1024, hint: 'Longest generation, for strong PCs' },
 ];
 
 export class MapConfigError extends Error {}
@@ -67,15 +68,17 @@ export function toTerrainConfig(m: MapConfig): TerrainConfig {
     resolution: m.size * 0.75,
     baseFrequency: DEFAULT_TERRAIN.baseFrequency,
     gen: m.gen ?? 1,
-    // Mountains: gen 2 lowlands are also a bit hillier.
-    maxHeight: (m.gen ?? 1) >= 2 ? 8 : DEFAULT_TERRAIN.maxHeight,
+    // Mountains: gen 2 lowlands are also a bit hillier, gen 5 much more.
+    maxHeight: (m.gen ?? 1) >= 5 ? 13 : (m.gen ?? 1) >= 2 ? 8 : DEFAULT_TERRAIN.maxHeight,
   };
 }
 
 /** Creature counts scale with area so a Huge map isn't empty and a Small one isn't a death trap. */
 export function creatureBudget(m: MapConfig): { wolf: number; deer: number; boar: number } {
-  // The island covers ~half the map.
-  const k = ((m.size * m.size) / (256 * 256)) * 0.65;
+  // The island covers ~half the map. Past 512 m the number grows with the
+  // map's edge rather than its area, so a giant island doesn't need 500 brains.
+  const area = (Math.min(m.size, 512) / 256) ** 2 * (m.size > 512 ? m.size / 512 : 1);
+  const k = area * 0.65;
   // Roughly double the original population: at 256 m that's 7 wolves, 16 deer, 7 boars.
   return {
     wolf: Math.max(3, Math.round(11 * k)),

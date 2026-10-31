@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { PropKind } from '../world/TerrainGenerator';
 import { foliageMaterial } from './Foliage';
+import type { TreeImpostors } from './Impostors';
 import { firLowGeometry, flatMaterial, propGeometry } from './LowPolyFactory';
 
 /**
@@ -14,9 +15,24 @@ import { firLowGeometry, flatMaterial, propGeometry } from './LowPolyFactory';
  *
  * Per-instance work is done here instead of per mesh: distance culling (fog),
  * hiding small props far away, detailed meshes for the N nearest trees only,
- * and hiding felled trees.
+ * and hiding felled trees. Trees past `lowTrees` become impostors (a third
+ * batch, see Impostors.ts), so the view can reach 1000 m.
  * Three does the per-instance frustum culling.
  */
+
+/** Draw distances (m) applied by update(). */
+export interface PropDistances {
+  /** Nothing past this (the fog distance). */
+  view: number;
+  /** How many of the nearest trees use the detailed mesh. */
+  detailedTrees: number;
+  /** Grass, flowers, small plants. */
+  smallProps: number;
+  /** Trees closer than this are real meshes; further ones (up to `view`) are impostors. */
+  lowTrees: number;
+  /** Rocks, bushes, logs and the like. */
+  bigProps: number;
+}
 
 /** Too small to see from afar: only drawn near the player. */
 const SMALL: ReadonlySet<PropKind> = new Set<PropKind>(['grass_tuft', 'fiber_plant', 'mushroom', 'rare_flower', 'shell_bed', 'salt_deposit', 'fish_shoal', 'tall_grass', 'reeds', 'dead_bush']);
@@ -31,6 +47,9 @@ interface Prop {
   variant: Variant;
   solidId: number;
   leafId: number;
+  /** Tree impostor instance, or -1. */
+  impId: number;
+  impShown: boolean;
   depleted: boolean;
   /** Last applied state, so update() only touches what changed. */
   shown: boolean;
@@ -88,10 +107,12 @@ export interface PropPlacement {
 export class PropBatches {
   readonly solid: THREE.BatchedMesh;
   readonly leaves: THREE.BatchedMesh;
+  /** Far trees (empty when no impostors were baked). */
+  readonly impostors: THREE.BatchedMesh;
   private readonly props: Prop[] = [];
 
-  /** Builds both batches for `placements`; prop i of the result is placements[i]. */
-  constructor(placements: readonly PropPlacement[]) {
+  /** Builds the batches for `placements`; prop i of the result is placements[i]. */
+  constructor(placements: readonly PropPlacement[], private readonly imp: TreeImpostors | null = null) {
     // 1. Unique geometries, split into parts, and the space they need.
     const parts = new Map<string, { kind: PropKind; high: ReturnType<typeof split>; low: ReturnType<typeof split> | null }>();
     for (const p of placements) {
@@ -117,6 +138,19 @@ export class PropBatches {
       if (v.high.solid) sn++;
       if (v.high.leaf) ln++;
     }
+    let iv = 0, ii = 0, inst = 0;
+    if (imp) {
+      for (const g of imp.geometry.values()) { iv += g.attributes['position']!.count; ii += g.index!.count; }
+      for (const p of placements) if (p.kind === 'tree' && imp.geometry.has(p.variant)) inst++;
+    }
+    this.impostors = new THREE.BatchedMesh(Math.max(1, inst), Math.max(3, iv), Math.max(3, ii), imp?.material ?? flatMaterial);
+    this.impostors.name = 'props-impostors';
+    // 4 triangles each: drawing every one is cheaper than frustum-testing 10,000+ of them on the CPU.
+    this.impostors.perObjectFrustumCulled = false;
+    this.impostors.sortObjects = false;
+    this.impostors.castShadow = this.impostors.receiveShadow = false; // far beyond the shadow range anyway
+    const impIds = new Map<number, number>();
+    if (imp) for (const [shape, g] of imp.geometry) impIds.set(shape, this.impostors.addGeometry(g));
     this.solid = new THREE.BatchedMesh(Math.max(1, sn), Math.max(3, sv), Math.max(3, si), flatMaterial);
     this.leaves = new THREE.BatchedMesh(Math.max(1, ln), Math.max(3, lv), Math.max(3, li), foliageMaterial());
     for (const b of [this.solid, this.leaves]) {
@@ -124,6 +158,8 @@ export class PropBatches {
       // Leaves are drawn in many layers: sampling the shadow map in each costs ~5 ms on an integrated GPU.
       b.receiveShadow = b === this.solid;
       b.name = b === this.solid ? 'props-solid' : 'props-leaves';
+      // Opaque / alpha-tested: depth-sorting thousands of instances every frame bought nothing (~6 ms of CPU).
+      b.sortObjects = false;
     }
 
     // 2. Register geometries once each.
@@ -140,8 +176,14 @@ export class PropBatches {
     for (const p of placements) {
       const variant = ids.get(`${p.kind}|${p.variant}`)!;
       const prop: Prop = {
-        x: p.x, z: p.z, small: SMALL.has(p.kind), variant, solidId: -1, leafId: -1, depleted: false, shown: true, low: false,
+        x: p.x, z: p.z, small: SMALL.has(p.kind), variant, solidId: -1, leafId: -1, impId: -1, impShown: true,
+        depleted: false, shown: true, low: false,
       };
+      const ig = p.kind === 'tree' ? impIds.get(p.variant) : undefined;
+      if (ig !== undefined) {
+        prop.impId = this.impostors.addInstance(ig);
+        this.impostors.setMatrixAt(prop.impId, p.matrix);
+      }
       if (variant.high.solid >= 0) {
         prop.solidId = this.solid.addInstance(variant.high.solid);
         this.solid.setMatrixAt(prop.solidId, p.matrix);
@@ -156,12 +198,21 @@ export class PropBatches {
     this.solid.computeBoundingSphere();
     this.leaves.computeBoundingBox();
     this.leaves.computeBoundingSphere();
+    this.impostors.computeBoundingBox();
+    this.impostors.computeBoundingSphere();
   }
+
+  /** Where update() last ran, and with what: it is skipped while the camera stays put. */
+  private lastX = Number.NaN;
+  private lastZ = 0;
+  private lastKey = '';
+  private dirty = true;
 
   /** Felled tree / mined rock: hidden until it regrows. */
   setDepleted(prop: number, depleted: boolean): void {
     const p = this.props[prop];
     if (p) p.depleted = depleted;
+    this.dirty = true;
   }
 
   /** Scratch for update(): indices of the nearest trees, sorted by distance. */
@@ -173,12 +224,22 @@ export class PropBatches {
    * `d.view` are hidden, small ones past `d.smallProps`, and only the
    * `d.detailedTrees` nearest visible trees use the detailed mesh — every
    * other tree, however close, uses the low LOD. That caps the cost of
-   * dense forest at a fixed number of detailed trees. Cheap: only changed
-   * instances are touched.
+   * dense forest at a fixed number of detailed trees. Trees past `lowTrees`
+   * switch to their impostor. Only changed instances are touched, and
+   * nothing runs while the camera has moved less than half a metre.
    */
-  update(x: number, z: number, d: { view: number; detailedTrees: number; smallProps: number }): void {
+  update(x: number, z: number, d: PropDistances): void {
+    const key = `${d.view}|${d.detailedTrees}|${d.smallProps}|${d.lowTrees}|${d.bigProps}`;
+    if (!this.dirty && key === this.lastKey && (x - this.lastX) ** 2 + (z - this.lastZ) ** 2 < 0.25) return;
+    this.dirty = false;
+    this.lastKey = key;
+    this.lastX = x;
+    this.lastZ = z;
     const view2 = d.view * d.view;
     const small2 = d.smallProps * d.smallProps;
+    const big2 = Math.min(d.bigProps, d.view) ** 2;
+    // Without impostors, trees stay real meshes all the way to the fog.
+    const low2 = this.imp ? Math.min(d.lowTrees, d.view) ** 2 : view2;
     const keep = Math.max(0, d.detailedTrees);
     const near = this.nearest, nearD2 = this.nearestD2;
     near.length = 0;
@@ -186,7 +247,15 @@ export class PropBatches {
     for (let i = 0; i < this.props.length; i++) {
       const p = this.props[i]!;
       const dx = p.x - x, dz = p.z - z, d2 = dx * dx + dz * dz;
-      const shown = !p.depleted && d2 < (p.small ? small2 : view2);
+      const tree = p.variant.low !== null;
+      const shown = !p.depleted && d2 < (p.small ? small2 : tree ? low2 : big2);
+      if (p.impId >= 0) {
+        const imp = !p.depleted && !shown && d2 < view2;
+        if (imp !== p.impShown) {
+          p.impShown = imp;
+          this.impostors.setVisibleAt(p.impId, imp);
+        }
+      }
       if (shown !== p.shown) {
         p.shown = shown;
         if (p.solidId >= 0) this.solid.setVisibleAt(p.solidId, shown);
@@ -219,5 +288,7 @@ export class PropBatches {
   dispose(): void {
     this.solid.dispose();
     this.leaves.dispose();
+    this.impostors.dispose();
+    this.imp?.dispose();
   }
 }

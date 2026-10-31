@@ -84,7 +84,7 @@ export function spawnCreature(world: World, species: CreatureSpecies, home: Vec3
     blackboard: makeBlackboard(home, waypoints, seed),
     lod: 'active',
   });
-  world.add(e, Cullable, { radius: species === 'crocodile' ? 2.6 : species === 'bear' ? 1.8 : 1.2, maxDistance: 120, visible: true });
+  world.add(e, Cullable, { radius: species === 'crocodile' ? 2.6 : species === 'bear' ? 1.8 : 1.2, maxDistance: 200, visible: true });
   return e;
 }
 

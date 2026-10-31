@@ -10,7 +10,7 @@ import type { DayNightCycle } from '../DayNightCycle';
 import type { SurvivalStatusManager } from '../SurvivalStatusManager';
 import { Action, Condition, Selector, Sequence, type BTContext, type BTNode, type BTStatus } from './BehaviorTree';
 import { ECOLOGY, biteResource, ecoState, isEater, killCreature, nearestFood } from './Ecology';
-import type { PathProvider } from './nav/FlowFieldService';
+import { straightLinePaths, type PathProvider } from './nav/FlowFieldService';
 import { wrapAngle } from './PerceptionSystem';
 
 export interface AIServices {
@@ -45,8 +45,8 @@ const STUCK_GIVE_UP = 2.5; // seconds without progress → treat the target as r
 const EAT_REACH = 1.7;
 /** Seconds of walking toward food before deciding it's out of reach. */
 const TRAVEL_GIVE_UP = 25;
-/** Off-screen, far-away animals think 1 tick in DORMANT_EVERY (with a longer dt), so the food chain goes on everywhere. */
-const DORMANT_EVERY = 4;
+/** Off-screen, far-away animals think 1 tick in DORMANT_EVERY (with a longer dt, ~7 Hz), so the food chain goes on everywhere. */
+const DORMANT_EVERY = 8;
 
 // ---------------------------------------------------------------------------
 // Conditions
@@ -495,6 +495,14 @@ export class AISystem implements System {
       deer: this.deer, prey: this.prey, piglets: this.piglets, wolves: this.wolves,
     };
     services.paths.beginTick();
+    // Off-screen, far animals steer in straight lines (sliding along obstacles)
+    // instead of building flow fields: nobody sees their exact route, and on a
+    // big island hundreds of them were rebuilding fields every tick.
+    const real = services.paths;
+    const dormantServices: AIServices = {
+      ...services,
+      paths: { beginTick: () => undefined, isWalkable: (x, z) => real.isWalkable(x, z), steer: straightLinePaths.steer },
+    };
     this.tick++;
     for (const e of world.query(AIBrain, Creature, Transform)) {
       const brain = world.require(e, AIBrain);
@@ -505,7 +513,7 @@ export class AISystem implements System {
       if (brain.lod === 'dormant') {
         // Keep prev == current so the renderer doesn't keep blending a stale step.
         copyVec(t.prevPosition, t.position);
-        // Off-screen and far: think at a quarter of the rate (staggered), so
+        // Off-screen and far: think at an eighth of the rate (staggered), so
         // animals still eat, hunt and wander where the player isn't looking.
         if ((this.tick + e) % DORMANT_EVERY !== 0) continue;
         step = dt * DORMANT_EVERY;
@@ -522,7 +530,7 @@ export class AISystem implements System {
       t.prevRotation.z = t.rotation.z;
       t.prevRotation.w = t.rotation.w;
 
-      const ctx: Ctx = { world, entity: e, bb: brain.blackboard, dt: step, services };
+      const ctx: Ctx = { world, entity: e, bb: brain.blackboard, dt: step, services: brain.lod === 'dormant' ? dormantServices : services };
       const before = brain.blackboard.state;
       tree.tick(ctx);
       if (!world.has(e, Creature)) continue; // starved or killed this tick

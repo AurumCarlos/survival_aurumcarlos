@@ -13,7 +13,7 @@ npm run typecheck:core  # proves the simulation layer has no Three/Cannon import
 ```
 
 Controls use physical key positions (`KeyboardEvent.code`), so **WASD lands on ZQSD on AZERTY**.
-Shift sprint · C crouch · Space jump · hold E harvest · I/Tab inventory · 1–6 or mouse wheel hotbar ·
+Shift sprint · C crouch · Space jump · hold E harvest · I/Tab inventory · M map · 1–6 or mouse wheel hotbar ·
 LMB swing · RMB throw spear · B build mode (R/wheel piece, LMB place, X demolish) · E door · Esc or P pause.
 
 **Spectator mode** (New world → Spectator mode): fly freely through everything (ZQSD/WASD where you
@@ -461,6 +461,54 @@ cost 300 ms per step; compound bodies cost 0.5 ms.
 - **Animals spinning on the spot (fixed):** a patrol waypoint inside a trunk made the animal circle it
   forever; the stuck detector was reset by tiny gains. Unreachable waypoints now count as reached when
   close, and "stuck" means not getting a quarter metre closer than ever before.
+
+## 14. View distance up to 1000 m, giant maps
+
+- **View distance** (Settings → Graphics, 150–1000 m, default 300): the daylight fog distance (less at night
+  and in the rain); the camera's far plane follows it.
+- **Giant maps:** up to 1024 m (custom sizes snap to multiples of 32 m — 1000 becomes 992 — and the form now
+  shows the adjusted value). Past 512 m the animal count grows with the map's edge, not its area.
+- **Rendering at long range:**
+  - *Terrain LOD:* full-resolution 32 m chunks near the camera; past 180 m, 128 m tiles at half resolution,
+    past 420 m at quarter resolution, with skirts so levels never show cracks; far tiles skip shadows.
+  - *Terrain shader LOD:* normal-map relief fades out by 80 m and the five texture layers by 160 m (replaced
+    by each layer's exact average colour), so most of a long view costs no texture reads.
+  - *Tree impostors:* each tree shape's detailed model is baked once into an atlas; past 230 m trees are two
+    crossed quads (4 triangles). Leaf alpha is scaled with the mip level so distant foliage stays full
+    instead of thinning to twigs (this also fixed the "poles with dots" look of mid-distance trees).
+  - Prop batches no longer depth-sort thousands of opaque instances, impostors skip per-instance culling,
+    and per-instance updates are skipped while the camera hasn't moved.
+- **Simulation at scale:** plant regrowth and rotting carcasses no longer scan every resource each tick
+  (50,000 on a giant island: ~150 ms per frame); off-screen animals steer in straight lines instead of
+  building flow fields; static colliders are grouped per 128 m (cannon-es pair matrix).
+- Measured on the integrated GPU, 1000 m map, 1000 m view, max quality at full resolution: 5 → 14+ FPS
+  (simulation 154 → ~20 ms per frame, GPU 41 → 29 ms); a 1000 m view costs only ~5 ms of GPU more than 300 m.
+  In Auto quality the resolution adapts to hold the target frame rate.
+- **Fixed:** saves with animals grazing, eating or stalking were rejected as unreadable (the save validator
+  didn't know the food-chain states); they load again.
+
+## 15. Maps, faster loading, more relief, 60 FPS on giant maps
+
+- **Minimap** (top right, north up, ~110 m around you; Settings → Show minimap) and **full map on M**
+  (`ui/MapView.ts`): one picture of the island made at load from the terrain — biome colours, water by depth,
+  steep rock, hill shading, 10 m contours — with markers for you (arrow), caves, buildings, beds and camp
+  structures, a legend of the island's biomes and a 100 m scale bar.
+- **Generator v5** (new worlds; older ones regenerate unchanged): more, taller mountains (peaks ~90 m on big
+  maps), winding ranges of sharp ridges, broad valleys, hillier lowlands; highlands start higher so biomes
+  stay varied. Also ~2× faster: the coast profile is tabulated and the vegetation reads the biome map
+  instead of recomputing it.
+- **Loading** (1000 m map, integrated laptop): ~27 s → ~5 s (v4 world) / ~3.5 s (v5); a 512 m v5 world
+  loads in ~1 s.
+  - Colliders: cannon-es `addShape` recomputes the whole body each time (quadratic): shapes are now
+    added in one go — 12 s → 0.3 s.
+  - Terrain textures are baked in a worker while you're in the menu (`textures.worker.ts`).
+  - Full-resolution terrain chunks are built only around the player; the rest stream in, nearest first,
+    ~3 ms per frame, the coarse tile standing in until they're ready.
+  - Loading work slices are 40 ms (was 6–8 ms: most of each frame was spent waiting).
+- **Frame rate** (1000 m map): Auto quality now holds 60+ FPS on the integrated GPU; the CPU per frame
+  dropped from ~24 ms to ~8 ms.
+  - Hidden animals no longer have every part's matrix recomputed each frame (`matrixWorldAutoUpdate`).
+  - Off-screen animals think at ~7 Hz; static colliders are grouped per 128 m; terrain groups are static.
 
 ## Verification
 

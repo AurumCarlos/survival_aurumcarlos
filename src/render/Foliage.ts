@@ -199,6 +199,19 @@ let material: THREE.MeshLambertMaterial | null = null;
  * wind. Lambert, not PBR, and no alpha-to-coverage: leaves are drawn in many
  * overlapping layers, so their per-pixel cost dominates the frame.
  */
+/**
+ * Alpha-tested leaves thin out with distance: each mipmap averages leaf and
+ * gap, so less of it passes the alpha test and far trees turn into twigs.
+ * Scaling alpha up with the mip level keeps the coverage (Ben Golus' fix).
+ */
+export const MIP_ALPHA_GLSL = (w: number, h: number): string => `
+  {
+    vec2 texel = vMapUv * vec2(${w.toFixed(1)}, ${h.toFixed(1)});
+    vec2 dx = dFdx(texel), dy = dFdy(texel);
+    float mip = 0.5 * log2(max(dot(dx, dx), dot(dy, dy)));
+    diffuseColor.a *= 1.0 + max(mip, 0.0) * 0.25;
+  }`;
+
 export function foliageMaterial(): THREE.MeshLambertMaterial {
   if (material) return material;
   const m = new THREE.MeshLambertMaterial({
@@ -227,12 +240,14 @@ export function foliageMaterial(): THREE.MeshLambertMaterial {
     shader.uniforms['uSkyAmbient'] = skyAmbient;
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', '#include <common>\nuniform vec3 uSkyAmbient;')
+      .replace('#include <map_fragment>', `#include <map_fragment>
+        ${MIP_ALPHA_GLSL(ATLAS, ATLAS)}`)
       .replace('#include <normal_fragment_begin>', `#include <normal_fragment_begin>
         normal = normalize(vNormal);`)
       .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
         reflectedLight.indirectDiffuse += diffuseColor.rgb * uSkyAmbient;`);
   };
-  m.customProgramCacheKey = () => 'foliage-v2';
+  m.customProgramCacheKey = () => 'foliage-v3';
   material = m;
   return m;
 }

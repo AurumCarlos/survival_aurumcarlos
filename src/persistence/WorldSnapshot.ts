@@ -190,7 +190,12 @@ function migrate(raw: unknown): unknown {
 }
 
 const SPECIES: ReadonlySet<string> = new Set<CreatureSpecies>(['wolf', 'deer', 'boar', 'crocodile', 'bear']);
-const AI_STATES: ReadonlySet<string> = new Set<AIState>(['patrol', 'chase', 'hunt', 'flee', 'attack']);
+// A Record, so adding an AIState without listing it here is a type error
+// (the food-chain states once made every save with a grazing deer unreadable).
+const AI_STATE_LIST: Readonly<Record<AIState, true>> = {
+  patrol: true, chase: true, hunt: true, flee: true, attack: true, graze: true, feed: true, stalk: true,
+};
+const AI_STATES: ReadonlySet<string> = new Set(Object.keys(AI_STATE_LIST));
 
 /**
  * Structural validation. A save comes from storage the user (or a bug) can

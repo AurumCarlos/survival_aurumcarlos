@@ -218,13 +218,22 @@ const NORMAL_STRENGTH: Record<TerrainLayer, number> = { sand: 3, grass: 4, dirt:
 export interface TerrainTextures {
   albedo: THREE.DataArrayTexture;
   normal: THREE.DataArrayTexture;
+  /** Each layer's average linear colour (what its smallest mipmap looks like): far terrain uses it instead of sampling. */
+  means: THREE.Vector3[];
 }
 
 let terrainTex: TerrainTextures | null = null;
 
-/** Bakes the five terrain layers (≈ 0.5 s once, then cached for every session). */
-export function terrainTextures(): TerrainTextures {
-  if (terrainTex) return terrainTex;
+/** The raw layer data (pure computation: also runs in textures.worker.ts). */
+export interface TerrainTextureData {
+  albedo: Uint8Array<ArrayBuffer>;
+  normal: Uint8Array<ArrayBuffer>;
+  /** Average linear colour of each layer, flattened r, g, b. */
+  means: Float32Array<ArrayBuffer>;
+}
+
+/** Bakes the five terrain layers (about a second: done in a worker at start-up when possible). */
+export function bakeTerrainData(): TerrainTextureData {
   const n = TERRAIN_LAYERS.length, px = SIZE * SIZE;
   const albedo = new Uint8Array(px * 4 * n);
   const normal = new Uint8Array(px * 4 * n);
@@ -247,8 +256,52 @@ export function terrainTextures(): TerrainTextures {
     }
     heightToNormal(h, SIZE, NORMAL_STRENGTH[name], normal, base, (i) => r[i]!);
   });
-  const make = (data: Uint8Array<ArrayBuffer>, srgb: boolean): THREE.DataArrayTexture => {
-    const tex = new THREE.DataArrayTexture(data, SIZE, SIZE, n);
+  const lin = (v: number): number => {
+    const c = v / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  const means = new Float32Array(n * 3);
+  for (let layer = 0; layer < n; layer++) {
+    let mr = 0, mg = 0, mb = 0;
+    for (let i = 0, o = layer * px * 4; i < px; i++, o += 4) {
+      mr += lin(albedo[o]!);
+      mg += lin(albedo[o + 1]!);
+      mb += lin(albedo[o + 2]!);
+    }
+    means.set([mr / px, mg / px, mb / px], layer * 3);
+  }
+  return { albedo, normal, means };
+}
+
+let pendingData: TerrainTextureData | null = null;
+
+/**
+ * Starts baking the terrain textures in a worker (call at start-up): the
+ * first world then doesn't wait for them. If the world is built before the
+ * worker answers, terrainTextures() just bakes them itself.
+ */
+export function prepareTerrainTextures(makeWorker: () => Worker): void {
+  if (terrainTex || pendingData) return;
+  try {
+    const w = makeWorker();
+    w.onmessage = (e: MessageEvent<TerrainTextureData>) => {
+      if (!terrainTex) pendingData = e.data;
+      w.terminate();
+    };
+    w.onerror = () => w.terminate();
+  } catch {
+    // No workers: baked on first use.
+  }
+}
+
+/** The terrain layer textures (from the worker's data if it has arrived, else baked now). */
+export function terrainTextures(): TerrainTextures {
+  if (terrainTex) return terrainTex;
+  const data = pendingData ?? bakeTerrainData();
+  pendingData = null;
+  const n = TERRAIN_LAYERS.length;
+  const make = (arr: Uint8Array<ArrayBuffer>, srgb: boolean): THREE.DataArrayTexture => {
+    const tex = new THREE.DataArrayTexture(arr, SIZE, SIZE, n);
     tex.format = THREE.RGBAFormat;
     tex.type = THREE.UnsignedByteType;
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
@@ -260,17 +313,13 @@ export function terrainTextures(): TerrainTextures {
     tex.needsUpdate = true;
     return tex;
   };
-  terrainTex = { albedo: make(albedo, true), normal: make(normal, false) };
+  const means = Array.from({ length: n }, (_, i) => new THREE.Vector3(data.means[i * 3]!, data.means[i * 3 + 1]!, data.means[i * 3 + 2]!));
+  terrainTex = { albedo: make(data.albedo, true), normal: make(data.normal, false), means };
   return terrainTex;
 }
 
 let grainTex: THREE.DataTexture | null = null;
 
-/**
- * Generic surface detail for props, creatures and structures: RGB = normal,
- * A = height (darkens crevices). Sampled triplanar in world space, so it needs
- * no UVs and works on every procedural mesh.
- */
 export function grainTexture(): THREE.DataTexture {
   if (grainTex) return grainTex;
   const S = GRAIN_SIZE, px = S * S;

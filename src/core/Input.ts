@@ -23,7 +23,8 @@ export type Action =
   | 'pause'
   | 'build'
   | 'cyclePiece'
-  | 'demolish';
+  | 'demolish'
+  | 'map';
 
 export type Binding = string; // KeyboardEvent.code, or 'Mouse0' / 'Mouse1' / 'Mouse2'
 
@@ -45,6 +46,7 @@ export const DEFAULT_BINDINGS: Readonly<Record<Action, readonly Binding[]>> = {
   build: ['KeyB'],
   cyclePiece: ['KeyR'],
   demolish: ['KeyX'],
+  map: ['KeyM'],
 };
 
 // v2: bindings changed (Ctrl removed from crouch); old saved maps are discarded.

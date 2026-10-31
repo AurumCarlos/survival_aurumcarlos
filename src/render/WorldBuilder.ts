@@ -7,6 +7,7 @@ import { ISLAND, TREE_HEIGHT_STRETCH, type TerrainData, type PropKind } from '..
 import type { PopulatedWorld } from '../world/WorldPopulator';
 import { campfireObject, caveMaterial, caveShellGeometry, flatMaterial, leanToObject, propGeometry, structureObject } from './LowPolyFactory';
 import { PropBatches, type PropPlacement } from './PropBatches';
+import { bakeTreeImpostors } from './Impostors';
 import { creatureMesh } from './CreatureModels';
 import { RenderObject } from './Renderer';
 import { createTerrainMaterial, createWaterMaterial } from './Materials';
@@ -21,10 +22,35 @@ export interface Chunk {
   /** World-space bounds of the terrain, used for frustum culling. */
   bounds: THREE.Box3;
   center: THREE.Vector3;
+  /**
+   * Full-resolution meshes are built lazily: at load only near the player,
+   * the rest a few per frame as the player comes closer (CullingSystem). The
+   * coarse tile covers the area until then.
+   */
+  built: boolean;
+  build(): void;
 }
+
+/**
+ * Terrain level of detail: 4 × 4 chunks (128 m) as one mesh at half
+ * resolution (`mid`, from TERRAIN_LOD.mid metres) and at quarter resolution
+ * (`far`, from TERRAIN_LOD.far). Close to the camera the full-resolution
+ * chunks of the tile are drawn instead. Skirts hide the cracks where levels meet.
+ */
+export interface TerrainTile {
+  mid: THREE.Mesh;
+  far: THREE.Mesh;
+  bounds: THREE.Box3;
+  /** Indices into BuiltWorld.chunks. */
+  chunks: number[];
+}
+
+/** Distances (m, from the camera to the tile's edge) where terrain switches to the coarser meshes. */
+export const TERRAIN_LOD = { tileChunks: 4, mid: 180, far: 420 } as const;
 
 export interface BuiltWorld {
   chunks: Chunk[];
+  tiles: TerrainTile[];
   /** All static props, drawn in two batches. */
   props: PropBatches;
   /** Harvestable entity → its prop index in `props`. */
@@ -37,7 +63,14 @@ export interface BuildOptions {
   frameBudgetMs?: number;
   signal?: AbortSignal;
   onProgress?: (fraction: number) => void;
+  /** Bakes far-tree impostors with it (without one, trees stay meshes up to the fog). */
+  renderer?: THREE.WebGLRenderer;
+  /** Where the player starts: full-resolution terrain is built around it first. */
+  focus?: { x: number; z: number };
 }
+
+/** Full-resolution chunks built at load within this distance of the player (m); further ones are streamed. */
+export const PRELOAD_RADIUS = TERRAIN_LOD.mid + 50;
 
 /**
  * Render side of world construction: terrain chunk meshes and per-chunk
@@ -45,8 +78,8 @@ export interface BuildOptions {
  * only creates their visuals and links harvestable entities to instances.
  *
  * Time-sliced: work is split per chunk and the builder yields to the browser
- * whenever it has used `frameBudgetMs`, so even a 512 m map (256 chunks)
- * keeps the loading screen animating at 60 FPS instead of freezing.
+ * whenever it has used `frameBudgetMs` (40 ms: the loading bar keeps moving,
+ * without wasting most of each frame waiting), so even a 1000 m map never freezes the page.
  *
  * Draw-call strategy: each 32 m chunk owns one terrain mesh (culled per
  * chunk); every prop of the map goes into two BatchedMeshes (see
@@ -55,7 +88,7 @@ export interface BuildOptions {
 export async function buildWorldVisuals(
   scene: THREE.Scene, terrain: TerrainData, populated: PopulatedWorld, opts: BuildOptions = {},
 ): Promise<BuiltWorld> {
-  const budget = opts.frameBudgetMs ?? 8;
+  const budget = opts.frameBudgetMs ?? 40;
   const { cfg, chunksPerSide } = terrain;
   const total = chunksPerSide * chunksPerSide;
   const chunks: Chunk[] = [];
@@ -71,16 +104,37 @@ export async function buildWorldVisuals(
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(), pos = new THREE.Vector3();
   const up = new THREE.Vector3(0, 1, 0);
 
+  const n = cfg.resolution + 1, step = cfg.size / cfg.resolution, half = cfg.size / 2;
+  const focus = opts.focus ?? terrain.spawn;
   for (let ci = 0; ci < total; ci++) {
     const cx = ci % chunksPerSide, cz = Math.floor(ci / chunksPerSide);
     const group = new THREE.Group();
     group.name = `chunk-${ci}`;
-    const chunk: Chunk = { group, bounds: new THREE.Box3(), center: new THREE.Vector3() };
+    group.matrixAutoUpdate = false; // static
+    const ix0 = cx * cellsPerChunk, iz0 = cz * cellsPerChunk;
+    // Bounds straight from the height field (the mesh may not exist yet).
+    let lo = Infinity, hi = -Infinity;
+    for (let iz = iz0; iz <= Math.min(iz0 + cellsPerChunk, cfg.resolution); iz++) {
+      for (let ix = ix0; ix <= Math.min(ix0 + cellsPerChunk, cfg.resolution); ix++) {
+        const h = terrain.heights[iz * n + ix]!;
+        if (h < lo) lo = h;
+        if (h > hi) hi = h;
+      }
+    }
+    const x0 = ix0 * step - half, z0 = iz0 * step - half;
+    const chunk: Chunk = {
+      group, bounds: new THREE.Box3(new THREE.Vector3(x0, lo, z0), new THREE.Vector3(x0 + cellsPerChunk * step, hi, z0 + cellsPerChunk * step)),
+      center: new THREE.Vector3(), built: false,
+      build() {
+        if (this.built) return;
+        this.built = true;
+        group.add(terrainChunkMesh(terrain, ix0, iz0, cellsPerChunk));
+      },
+    };
     chunks.push(chunk);
-
-    const ground = terrainChunkMesh(terrain, cx * cellsPerChunk, cz * cellsPerChunk, cellsPerChunk);
-    group.add(ground);
-    chunk.bounds.expandByObject(ground);
+    group.visible = false;
+    chunk.bounds.getCenter(chunk.center);
+    if (Math.hypot(chunk.center.x - focus.x, chunk.center.z - focus.z) < PRELOAD_RADIUS) chunk.build();
 
     for (const i of byChunk[ci]!) {
       const p = terrain.props[i]!;
@@ -94,7 +148,6 @@ export async function buildWorldVisuals(
       if (e !== undefined) instances.set(e, placements.length);
       placements.push({ kind: p.kind, variant, matrix: m.compose(pos, q, s).clone(), x: p.position.x, z: p.position.z });
     }
-    chunk.bounds.getCenter(chunk.center);
     scene.add(group);
 
     if (performance.now() - sliceStart > budget) {
@@ -105,8 +158,37 @@ export async function buildWorldVisuals(
     }
   }
 
-  const props = new PropBatches(placements);
-  scene.add(props.solid, props.leaves);
+  // Coarse terrain tiles for the distance.
+  const tiles: TerrainTile[] = [];
+  const T = TERRAIN_LOD.tileChunks;
+  for (let tz = 0; tz < chunksPerSide; tz += T) {
+    for (let tx = 0; tx < chunksPerSide; tx += T) {
+      const ix0 = tx * cellsPerChunk, iz0 = tz * cellsPerChunk, cells = T * cellsPerChunk;
+      const mid = terrainChunkMesh(terrain, ix0, iz0, cells, 2);
+      const far = terrainChunkMesh(terrain, ix0, iz0, cells, 4);
+      mid.visible = far.visible = false;
+      mid.matrixAutoUpdate = far.matrixAutoUpdate = false;
+      // Past TERRAIN_LOD.mid there is no shadow map (it covers ±40 m): skip the lookups.
+      mid.receiveShadow = far.receiveShadow = false;
+      const bounds = new THREE.Box3().setFromObject(mid);
+      const idx: number[] = [];
+      for (let cz = tz; cz < Math.min(tz + T, chunksPerSide); cz++) {
+        for (let cx = tx; cx < Math.min(tx + T, chunksPerSide); cx++) idx.push(cz * chunksPerSide + cx);
+      }
+      scene.add(mid, far);
+      tiles.push({ mid, far, bounds, chunks: idx });
+      if (performance.now() - sliceStart > budget) {
+        await nextFrame();
+        if (opts.signal?.aborted) throw new DOMException('World build cancelled', 'AbortError');
+        sliceStart = performance.now();
+      }
+    }
+  }
+
+  const shapes = [...new Set(placements.filter((p) => p.kind === 'tree').map((p) => p.variant))].sort((a, b) => a - b);
+  const impostors = opts.renderer && shapes.length ? bakeTreeImpostors(opts.renderer, shapes) : null;
+  const props = new PropBatches(placements, impostors);
+  scene.add(props.solid, props.leaves, props.impostors);
 
   // Caves: rock domes over the chambers carved into the mountains.
   for (const c of terrain.caves ?? []) {
@@ -144,7 +226,7 @@ export async function buildWorldVisuals(
   seaFloor.position.y = cfg.waterLevel - ISLAND.seaDepth - 0.05;
   scene.add(seaFloor);
   opts.onProgress?.(1);
-  return { chunks, props, instances, water };
+  return { chunks, tiles, props, instances, water };
 }
 
 /**
@@ -188,20 +270,34 @@ export function bindEntityVisuals(world: World, scene: THREE.Scene, assets: Asse
 /** Shared by every terrain chunk; textures are baked on first use. */
 let terrainMaterial: THREE.MeshLambertMaterial | null = null;
 
+/** How far skirts hang below a mesh's edge (m): deeper than any height step between LOD levels. */
+const SKIRT_DEPTH = 3;
+
 /**
  * Smooth textured terrain: an indexed grid per chunk. Normals come from the
  * global height field (central differences), so chunk borders don't show
  * seams. Each vertex carries five texture-layer weights and a colour tint.
+ *
+ * `stride` samples every n-th height vertex (2 = half resolution, for the
+ * distant LOD tiles). Every mesh has a skirt: its border repeated
+ * SKIRT_DEPTH lower, so the thin gaps between a fine chunk and a coarse tile
+ * next to it are never see-through.
  */
-function terrainChunkMesh(t: TerrainData, ix0: number, iz0: number, cells: number): THREE.Mesh {
+function terrainChunkMesh(t: TerrainData, ix0: number, iz0: number, cells: number, stride = 1): THREE.Mesh {
   const { cfg } = t;
   const n = cfg.resolution + 1;
   const step = cfg.size / cfg.resolution;
   const half = cfg.size / 2;
   const ix1 = Math.min(ix0 + cells, cfg.resolution);
   const iz1 = Math.min(iz0 + cells, cfg.resolution);
-  const w = ix1 - ix0 + 1, d = iz1 - iz0 + 1;
-  const count = w * d;
+  const xs: number[] = [], zs: number[] = [];
+  for (let ix = ix0; ix < ix1; ix += stride) xs.push(ix);
+  xs.push(ix1);
+  for (let iz = iz0; iz < iz1; iz += stride) zs.push(iz);
+  zs.push(iz1);
+  const w = xs.length, d = zs.length;
+  const border = 2 * (w + d) - 4;
+  const count = w * d + border;
   const positions = new Float32Array(count * 3);
   const normals = new Float32Array(count * 3);
   const colors = new Float32Array(count * 3);
@@ -212,19 +308,23 @@ function terrainChunkMesh(t: TerrainData, ix0: number, iz0: number, cells: numbe
   const tint = new THREE.Color();
   const nv = new THREE.Vector3();
 
-  for (let iz = iz0, v = 0; iz <= iz1; iz++) {
-    for (let ix = ix0; ix <= ix1; ix++, v++) {
+  for (let zi = 0, v = 0; zi < d; zi++) {
+    for (let xi = 0; xi < w; xi++, v++) {
+      const ix = xs[xi]!, iz = zs[zi]!;
       const y = h(ix, iz);
       positions[v * 3] = ix * step - half;
       positions[v * 3 + 1] = y;
       positions[v * 3 + 2] = iz * step - half;
-      nv.set(h(ix - 1, iz) - h(ix + 1, iz), 2 * step, h(ix, iz - 1) - h(ix, iz + 1)).normalize();
+      nv.set(h(ix - stride, iz) - h(ix + stride, iz), 2 * step * stride, h(ix, iz - stride) - h(ix, iz + stride)).normalize();
       normals[v * 3] = nv.x;
       normals[v * 3 + 1] = nv.y;
       normals[v * 3 + 2] = nv.z;
       const biome = t.biomes ? t.biomes[iz * n + ix]! : -1;
       terrainLayers(L, tint, y, t.slopes[iz * n + ix]!, cfg.waterLevel, ix * 31 + iz * 17, biome);
-      layersA.set([L[0]!, L[1]!, L[2]!, L[3]!], v * 4);
+      layersA[v * 4] = L[0]!;
+      layersA[v * 4 + 1] = L[1]!;
+      layersA[v * 4 + 2] = L[2]!;
+      layersA[v * 4 + 3] = L[3]!;
       layersB[v] = L[4]!;
       colors[v * 3] = tint.r;
       colors[v * 3 + 1] = tint.g;
@@ -237,6 +337,30 @@ function terrainChunkMesh(t: TerrainData, ix0: number, iz0: number, cells: numbe
       const a = z * w + x, b = a + 1, c = a + w, e = c + 1;
       index.push(a, c, b, b, c, e);
     }
+  }
+  // Skirt: walk the border once round, copy each vertex SKIRT_DEPTH lower and
+  // join consecutive pairs with a quad (double-sided via both windings).
+  const ring: number[] = [];
+  for (let x = 0; x < w; x++) ring.push(x);
+  for (let z = 1; z < d; z++) ring.push(z * w + w - 1);
+  for (let x = w - 2; x >= 0; x--) ring.push((d - 1) * w + x);
+  for (let z = d - 2; z > 0; z--) ring.push(z * w);
+  const base = w * d;
+  ring.forEach((src, k) => {
+    const v = base + k;
+    positions[v * 3] = positions[src * 3]!;
+    positions[v * 3 + 1] = positions[src * 3 + 1]! - SKIRT_DEPTH;
+    positions[v * 3 + 2] = positions[src * 3 + 2]!;
+    for (let c = 0; c < 3; c++) {
+      normals[v * 3 + c] = normals[src * 3 + c]!;
+      colors[v * 3 + c] = colors[src * 3 + c]!;
+    }
+    for (let c = 0; c < 4; c++) layersA[v * 4 + c] = layersA[src * 4 + c]!;
+    layersB[v] = layersB[src]!;
+  });
+  for (let k = 0; k < ring.length; k++) {
+    const a = ring[k]!, b = ring[(k + 1) % ring.length]!, a2 = base + k, b2 = base + ((k + 1) % ring.length);
+    index.push(a, b, a2, b, b2, a2, a, a2, b, b, a2, b2);
   }
 
   const geo = new THREE.BufferGeometry();

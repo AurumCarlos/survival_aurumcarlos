@@ -298,7 +298,7 @@ async function main(): Promise<void> {
   console.log('\n── Map configuration input ──');
   {
     check('size snapped to chunk multiple', parseMapConfig({ size: 300, seed: 1 }).size === 288);
-    check('size clamped to limits', parseMapConfig({ size: 5000, seed: 1 }).size === 512 && parseMapConfig({ size: 3, seed: 1 }).size === 128);
+    check('size clamped to limits', parseMapConfig({ size: 5000, seed: 1 }).size === 1024 && parseMapConfig({ size: 1000, seed: 1 }).size === 992 && parseMapConfig({ size: 3, seed: 1 }).size === 128);
     check('text seeds are hashed deterministically', parseMapConfig({ size: 256, seed: 'pine' }).seed === parseMapConfig({ size: 256, seed: 'pine' }).seed);
     let threw = false;
     try { parseMapConfig({ size: 'big' }); } catch (e) { threw = e instanceof MapConfigError; }

@@ -40,13 +40,25 @@ export interface TerrainConfig {
    * regenerate exactly the same world); 2 = mountains, caves and biomes;
    * 3 = a varied coastline (flat beaches, dunes, cliffs and coves);
    * 4 = special biomes (mangrove, rainforest, lake, savanna, desert,
-   * tall-grass prairie, tundra), a few per island.
+   * tall-grass prairie, tundra), a few per island; 5 = much more relief
+   * (more and taller mountains, ridges, valleys) and faster generation.
    */
   gen?: number;
 }
 
 /** Newest generator; new worlds use it. */
-export const GENERATOR_VERSION = 4;
+export const GENERATOR_VERSION = 5;
+
+/** Gen 5 relief. */
+export const RELIEF = {
+  /** Mountain ranges: ridged noise inland, this tall (m) at most. */
+  ridgeHeight: 22,
+  /** Valleys carved along noise zero-crossings, this deep (m). */
+  valleyDepth: 5,
+} as const;
+
+/** Gen 5: the coast profile is tabulated at this many angles (zone() is called millions of times). */
+const COAST_TABLE = 4096;
 
 export const BIOME = {
   beach: 0, forest: 1, jungle: 2, meadow: 3, highland: 4, snow: 5, cave: 6,
@@ -110,6 +122,8 @@ export function caveClearZone(c: Cave, x: number, z: number): boolean {
 }
 
 export function insideCave(c: Cave, x: number, z: number, margin = 0): boolean {
+  const r = c.length / 2 + margin;
+  if ((x - c.x) ** 2 + (z - c.z) ** 2 > r * r) return false; // outside the ellipse's bounding circle
   const { s, w } = caveLocal(c, x, z);
   const a = c.length / 2 + margin, b = c.width / 2 + margin;
   return (s * s) / (a * a) + (w * w) / (b * b) <= 1;
@@ -246,6 +260,11 @@ class IslandShape {
   /** Gen 4: the mangrove coast, if any: centre angle and angular half-width. */
   mangroveArc: { a: number; aw: number } | null = null;
   private regionWarp: Perlin | null = null;
+  /** Gen 5: coastAt() sampled round the island (coast, beach, cliff, dune, cliffH, mangrove per angle). */
+  private coastTable: Float32Array | null = null;
+  /** Gen 5: biome per height vertex, once computed (scattering reads it instead of recomputing). */
+  biomeGrid: { biomes: Uint8Array; n: number; step: number } | null = null;
+  private readonly relief: Perlin;
 
   constructor(readonly cfg: TerrainConfig) {
     this.half = cfg.size / 2;
@@ -261,7 +280,16 @@ class IslandShape {
       this.calibrateCoast();
       this.placeCoves();
     }
+    this.relief = new Perlin(cfg.seed + 5151);
     if (this.gen >= 4) this.planBiomes();
+    if (this.gen >= 5) {
+      const t = new Float32Array(COAST_TABLE * 6);
+      for (let k = 0; k < COAST_TABLE; k++) {
+        const p = this.coastAt((k / COAST_TABLE) * Math.PI * 2 - Math.PI);
+        t.set([p.coast, p.beach, p.cliff, p.dune, p.cliffH, p.mangrove ?? 0], k * 6);
+      }
+      this.coastTable = t;
+    }
   }
 
   /**
@@ -430,6 +458,13 @@ class IslandShape {
 
   /** Biome at a point, given its height. */
   biomeAt(x: number, z: number, h: number): Biome {
+    const bg = this.biomeGrid;
+    if (bg) {
+      const half = this.half;
+      const ix = Math.min(bg.n - 1, Math.max(0, Math.round((x + half) / bg.step)));
+      const iz = Math.min(bg.n - 1, Math.max(0, Math.round((z + half) / bg.step)));
+      return bg.biomes[iz * bg.n + ix] as Biome;
+    }
     const W = this.cfg.waterLevel;
     for (const c of this.caves) if (insideCave(c, x, z, 0.5)) return BIOME.cave;
     const { d, beach, mangrove = 0 } = this.zone(x, z);
@@ -439,13 +474,33 @@ class IslandShape {
     if (this.lake && Math.hypot(x - this.lake.x, z - this.lake.z) < this.lake.r + 7) return BIOME.lake;
     const top = this.peaks.reduce((a, p) => Math.max(a, p.h), 0);
     if (top > 0 && h > W + 3 + top * 0.66) return BIOME.snow;
-    if (h > W + 11) return BIOME.highland;
+    // Gen 5 hills and ridges are much taller: highlands start higher up.
+    if (h > W + (this.gen >= 5 ? 26 : 11)) return BIOME.highland;
     const region = this.regionAt(x, z);
     if (region !== null) return region;
     const m = this.moisture(x, z);
     if (m > 0.62) return BIOME.jungle;
     if (m < 0.33) return BIOME.meadow;
     return BIOME.forest;
+  }
+
+  /**
+   * Gen 5 relief: ranges of ridges winding across the inland (ridged noise,
+   * so crests are sharp and the slopes between them form gullies), and broad
+   * valleys along the zero-crossings of another noise field, never dug below
+   * the sea (no accidental lakes). `fade` keeps beaches and coasts flat.
+   */
+  private ridgesAndValleys(x: number, z: number, h: number, fade: number): number {
+    if (fade <= 0) return h;
+    const W = this.cfg.waterLevel;
+    const warpX = this.relief.fbm(x / 160, z / 160, 2) * 60, warpZ = this.relief.fbm(x / 160 + 40, z / 160 - 25, 2) * 60;
+    const ridge = this.relief.ridged((x + warpX) / 110, (z + warpZ) / 110, 4); // 0..1, sharp crests
+    const range = smoothstep(0.35, 0.75, (this.relief.fbm(x / 260 - 70, z / 260 + 90, 2) + 0.8) / 1.6); // where ranges run
+    h += Math.max(0, ridge - 0.45) / 0.55 * RELIEF.ridgeHeight * range * fade;
+    const v = Math.abs(this.relief.fbm(x / 140 + 300, z / 140 - 200, 2));
+    const valley = 1 - smoothstep(0.02, 0.12, v);
+    h -= valley * RELIEF.valleyDepth * fade;
+    return Math.max(h, W + 0.6 + (1 - fade) * 0.2);
   }
 
   /** Gen 4 relief: sand dunes in deserts, flat open tundra. */
@@ -500,6 +555,18 @@ class IslandShape {
 
   /** Metres inland from the waterline (negative = out at sea), the local beach width and coast type. */
   zone(x: number, z: number): CoastProfile & { d: number } {
+    const t = this.coastTable;
+    if (t) {
+      // Gen 5: interpolate the precomputed table (a few hundred times cheaper than coastAt).
+      const f = ((Math.atan2(z, x) + Math.PI) / (Math.PI * 2)) * COAST_TABLE;
+      const fl = Math.floor(f), a = f - fl, b = 1 - a;
+      const o0 = (fl % COAST_TABLE) * 6, o1 = ((fl + 1) % COAST_TABLE) * 6;
+      const coast = t[o0]! * b + t[o1]! * a;
+      return {
+        coast, beach: t[o0 + 1]! * b + t[o1 + 1]! * a, cliff: t[o0 + 2]! * b + t[o1 + 2]! * a, dune: t[o0 + 3]! * b + t[o1 + 3]! * a,
+        cliffH: t[o0 + 4]! * b + t[o1 + 4]! * a, mangrove: t[o0 + 5]! * b + t[o1 + 5]! * a, d: coast - Math.hypot(x, z),
+      };
+    }
     const p = this.coastAt(Math.atan2(z, x));
     return { ...p, d: p.coast - Math.hypot(x, z) };
   }
@@ -543,6 +610,7 @@ class IslandShape {
       const outcrop = Math.max(0, this.hills.ridged(x * f * 2.6 + 40, z * f * 2.6 - 17, 3) - 0.58) * 3;
       h = W + 0.7 + inland * (0.6 + hills * this.cfg.maxHeight + outcrop);
       if (this.gen >= 4) h = this.regionRelief(x, z, h, inland);
+      if (this.gen >= 5) h = this.ridgesAndValleys(x, z, h, this.inlandFade(d, beach));
       if (this.gen >= 2) h += this.mountain(x, z) * this.inlandFade(d, beach);
     }
     if (cliff > 0 && d > -1) {
@@ -557,6 +625,8 @@ class IslandShape {
     // Caves: carve the chamber floor flat into the mountainside, and keep the
     // ground in front of the mouth no higher than the floor.
     for (const c of this.caves) {
+      const reach = c.length / 2 + CAVE_APPROACH + 4;
+      if ((x - c.x) ** 2 + (z - c.z) ** 2 > reach * reach) continue; // far from this cave: skip the transform
       const { s, w } = caveLocal(c, x, z);
       if (Math.abs(w) > c.width / 2 + 3 || s > c.length / 2 + 2.5 || s < -c.length / 2 - CAVE_APPROACH) continue;
       if (insideCave(c, x, z, 0.4)) {
@@ -663,6 +733,7 @@ export function generateTerrain(cfg: TerrainConfig = DEFAULT_TERRAIN): TerrainDa
     }
     data.biomes = biomes;
     data.caves = island.caves.map((c) => ({ ...c }));
+    if (island.gen >= 5) island.biomeGrid = { biomes, n, step };
   }
   data.props = scatterProps(data, island, rand);
   return data;
@@ -676,10 +747,12 @@ export function generateTerrain(cfg: TerrainConfig = DEFAULT_TERRAIN): TerrainDa
 function placeMountainsAndCaves(island: IslandShape, _rand: () => number): void {
   const cfg = island.cfg;
   const rand = mulberry32(cfg.seed + 31337);
-  const count = cfg.size <= 192 ? 1 : cfg.size <= 384 ? 2 : 3;
+  // Gen 5: more, taller and broader mountains.
+  const big = island.gen >= 5;
+  const count = big ? (cfg.size <= 192 ? 2 : cfg.size <= 448 ? 3 : cfg.size <= 704 ? 4 : 6) : cfg.size <= 192 ? 1 : cfg.size <= 384 ? 2 : 3;
   const maxR = Math.max(6, island.radius * (1 - ISLAND.wobble) - island.beach - 40);
-  const peakH = clamp(cfg.size * 0.115, 16, 40);
-  const peakR = clamp(cfg.size * 0.2, 26, 80);
+  const peakH = big ? clamp(cfg.size * 0.15, 22, 70) : clamp(cfg.size * 0.115, 16, 40);
+  const peakR = big ? clamp(cfg.size * 0.12, 26, 85) : clamp(cfg.size * 0.2, 26, 80);
   for (let tries = 0; island.peaks.length < count && tries < 300; tries++) {
     const a = rand() * Math.PI * 2, r = Math.sqrt(rand()) * maxR * 0.85;
     const p = { x: Math.cos(a) * r, z: Math.sin(a) * r, h: peakH * (0.8 + rand() * 0.35), r: peakR * (0.8 + rand() * 0.35) };

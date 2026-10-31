@@ -35,11 +35,12 @@ export interface GraphicsSettings {
   resolution: string;
   /** How many of the nearest trees use the detailed mesh. */
   detailedTrees: number;
-  /** Percent of the normal distance props (trees, rocks…) are drawn to. */
-  viewDistance: number;
+  /** How far you can see in daylight (m): the fog distance; far trees are impostors, far terrain coarser. */
+  viewRange: number;
   /** Frame-rate limit, and what Auto quality aims for; 0 = unlimited. */
   targetFps: number;
   showFps: boolean;
+  showMinimap: boolean;
 }
 
 export const GRAPHICS_DEFS: readonly SettingDef[] = [
@@ -73,11 +74,12 @@ export const GRAPHICS_DEFS: readonly SettingDef[] = [
     kind: range(0, 80, 1),
   },
   {
-    key: 'viewDistance', label: 'Prop draw distance', group: 'World detail', default: 100,
-    help: 'Trees, rocks and bushes beyond this are not drawn (never past the fog).',
-    kind: range(40, 100, 5, '%'),
+    key: 'viewRange', label: 'View distance', group: 'World detail', default: 300,
+    help: 'How far you see in daylight (less at night and in the rain). Distant trees and terrain use light versions, so even 1000 m stays fast.',
+    kind: range(150, 1000, 50, 'm'),
   },
   { key: 'showFps', label: 'Show FPS counter', group: 'Display', default: true, kind: { type: 'toggle' } },
+  { key: 'showMinimap', label: 'Show minimap', group: 'Display', default: true, help: 'The full map is always on M.', kind: { type: 'toggle' } },
 ];
 
 // ---------------------------------------------------------------------------
