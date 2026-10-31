@@ -14,7 +14,7 @@ import { GameSession } from './GameSession';
 import { GameStateMachine, type AppState } from './GameStateMachine';
 import { loadSettings, saveSettings } from './SettingsStore';
 import {
-  CONTROL_DEFS, DEFAULT_CONTROLS, DEFAULT_GRAPHICS, DEFAULT_SIM, GRAPHICS_DEFS, SIM_DEFS, applySim, sanitize, type SettingDef,
+  CONTROL_DEFS, DEFAULT_CONTROLS, DEFAULT_GRAPHICS, GRAPHICS_DEFS, sanitize, type SettingDef,
 } from '../data/settings';
 import type { SettingsTab } from '../ui/SettingsPage';
 
@@ -98,7 +98,7 @@ export class App {
       onQuitToMenu: () => void this.quitToMenu(),
       onSettingChange: (section, key, value) => this.changeSetting(section, key, value),
       onSettingsReset: (section) => {
-        Object.assign(this.settings[section], section === 'graphics' ? DEFAULT_GRAPHICS : section === 'controls' ? DEFAULT_CONTROLS : DEFAULT_SIM);
+        Object.assign(this.settings[section], section === 'graphics' ? DEFAULT_GRAPHICS : DEFAULT_CONTROLS);
         this.applySettings();
       },
     }, this.model);
@@ -143,13 +143,13 @@ export class App {
   // ---- Settings ------------------------------------------------------------
 
   private changeSetting(section: SettingsTab, key: string, value: number | string | boolean): void {
-    const defs: readonly SettingDef[] = section === 'graphics' ? GRAPHICS_DEFS : section === 'controls' ? CONTROL_DEFS : SIM_DEFS;
+    const defs: readonly SettingDef[] = section === 'graphics' ? GRAPHICS_DEFS : CONTROL_DEFS;
     const target = this.settings[section] as unknown as Record<string, unknown>;
     Object.assign(target, sanitize<Record<string, unknown>>(defs, { ...target, [key]: value }));
     this.applySettings();
   }
 
-  /** Pushes the settings to the renderer, input, the simulation and the open game, and saves them. */
+  /** Pushes the settings to the renderer, input and sound, and saves them. */
   private applySettings(): void {
     const c = this.settings.controls;
     this.renderer.setGraphics(this.settings.graphics);
@@ -158,8 +158,6 @@ export class App {
     this.input.invertY = c.invertY;
     this.sound.setVolumes({ master: c.masterVolume / 100, ambience: c.ambienceVolume / 100, effects: c.effectsVolume / 100 });
     this.container.classList.toggle('hide-fps', !this.settings.graphics.showFps);
-    applySim(this.settings.sim);
-    this.session?.applySimSettings();
     saveSettings(this.settings);
   }
 

@@ -1,5 +1,4 @@
 import { itemDef } from '../data/items';
-import { SIM } from '../data/settings';
 import type {
   Activity, ItemId, StatusEffect, StatusEffectId, Survivor, SurvivorModifiers, ThermalExposure, Vitals,
 } from '../data/schema';
@@ -107,11 +106,10 @@ export class SurvivalStatusManager {
     const heatGap = Math.max(0, felt - th.comfortMaxC);
     const poisoned = this.hasEffect(s, 'food_poisoning');
 
-    // Settings multipliers (SIM): drains only — sleep's energy regeneration is not slowed by a slower tiredness.
-    const hungerRate = this.t.baseDecay.hunger * act.hunger * (1 + coldGap * th.coldHungerPerDegree) * SIM.hungerRate;
+    const hungerRate = this.t.baseDecay.hunger * act.hunger * (1 + coldGap * th.coldHungerPerDegree);
     const thirstRate =
-      this.t.baseDecay.thirst * act.thirst * (1 + heatGap * th.heatThirstPerDegree) * (poisoned ? 2 : 1) * SIM.thirstRate;
-    const energyRate = this.t.baseDecay.energy * act.energy * (act.energy > 0 ? SIM.energyRate : 1);
+      this.t.baseDecay.thirst * act.thirst * (1 + heatGap * th.heatThirstPerDegree) * (poisoned ? 2 : 1);
+    const energyRate = this.t.baseDecay.energy * act.energy;
 
     v.hunger = clamp(v.hunger - hungerRate * dt, 0, s.maxVitals.hunger);
     v.thirst = clamp(v.thirst - thirstRate * dt, 0, s.maxVitals.thirst);
@@ -122,7 +120,7 @@ export class SurvivalStatusManager {
       v.stamina = Math.max(0, v.stamina - this.t.stamina.sprintDrain * dt);
     } else {
       const energyFactor = 0.3 + 0.7 * (v.energy / s.maxVitals.energy);
-      v.stamina = Math.min(s.maxVitals.stamina, v.stamina + this.t.stamina.regen * SIM.staminaRegen * energyFactor * dt);
+      v.stamina = Math.min(s.maxVitals.stamina, v.stamina + this.t.stamina.regen * energyFactor * dt);
     }
 
     // ---- 2. Thermoregulation --------------------------------------------
@@ -185,7 +183,7 @@ export class SurvivalStatusManager {
     if (bleeding) hurt(d.bleedingPerStack * bleeding.stacks, 'combat');
 
     v.health -= damage * dt;
-    if (damage === 0 && wellFed) v.health += this.t.regen.rate * SIM.healthRegen * dt;
+    if (damage === 0 && wellFed) v.health += this.t.regen.rate * dt;
     v.health = clamp(v.health, 0, s.maxVitals.health);
 
     if (v.health <= 0) {

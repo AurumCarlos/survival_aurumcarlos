@@ -1,13 +1,10 @@
 /**
- * Player-adjustable settings: graphics (read by the renderer), controls &
- * audio (input, camera, sound) and simulation (read by the game systems). Engine-free: definitions, defaults and
+ * Player-adjustable settings: graphics (read by the renderer) and controls &
+ * audio (input, camera, sound). Engine-free: definitions, defaults and
  * validation only; the app layer persists them (app/SettingsStore.ts) and the
  * settings page (ui/SettingsPage.ts) is generated from these definitions.
- *
- * Simulation values live in one shared, mutable object, SIM. Systems read it
- * every tick, so a change on the settings page applies immediately, even in
- * the middle of a game. Every multiplier defaults to 1 and every other value
- * to what the game used before it was configurable.
+ * Gameplay itself (survival rates, animals, weather) is not adjustable: it is
+ * tuned in the game's own data.
  */
 
 export type SettingKind =
@@ -101,82 +98,17 @@ export const CONTROL_DEFS: readonly SettingDef[] = [
   { key: 'effectsVolume', label: 'Effects (steps, hits)', group: 'Audio', default: 80, kind: range(0, 100, 5, '%') },
 ];
 
-// ---------------------------------------------------------------------------
-// Simulation
-// ---------------------------------------------------------------------------
-
-export interface SimSettings {
-  dayLengthMinutes: number;
-  meanTempC: number;
-  tempSwingC: number;
-  hungerRate: number;
-  thirstRate: number;
-  energyRate: number;
-  healthRegen: number;
-  moveSpeed: number;
-  harvestYield: number;
-  resourceRespawn: number;
-  animalCount: number;
-  breedInterval: number;
-  breedChance: number;
-  mateDistance: number;
-  courtDistance: number;
-  gestationSeconds: number;
-  breedCooldownSeconds: number;
-  growTime: number;
-  rainFrequency: number;
-  staminaRegen: number;
-  craftSpeed: number;
-  toolDurability: number;
-  animalDamage: number;
-  animalHealth: number;
-  maxAnimals: number;
-}
-
-export const SIM_DEFS: readonly SettingDef[] = [
-  { key: 'dayLengthMinutes', label: 'Day length', group: 'Time & weather', default: 20, kind: range(1, 120, 1, 'min'), help: 'Real minutes for a full day and night.' },
-  { key: 'meanTempC', label: 'Average temperature', group: 'Time & weather', default: 22, kind: range(0, 40, 1, '°C') },
-  { key: 'tempSwingC', label: 'Day/night temperature swing', group: 'Time & weather', default: 7, kind: range(0, 20, 1, '°C') },
-  { key: 'hungerRate', label: 'Hunger speed', group: 'Survival', default: 1, kind: range(0, 5, 0.1, '×') },
-  { key: 'thirstRate', label: 'Thirst speed', group: 'Survival', default: 1, kind: range(0, 5, 0.1, '×') },
-  { key: 'energyRate', label: 'Tiredness speed', group: 'Survival', default: 1, kind: range(0, 5, 0.1, '×') },
-  { key: 'healthRegen', label: 'Health regeneration', group: 'Survival', default: 1, kind: range(0, 10, 0.1, '×') },
-  { key: 'moveSpeed', label: 'Movement speed', group: 'Player', default: 1, kind: range(0.5, 3, 0.1, '×') },
-  { key: 'harvestYield', label: 'Harvest yield', group: 'Player', default: 1, kind: range(0.5, 10, 0.5, '×') },
-  { key: 'resourceRespawn', label: 'Resource regrowth time', group: 'World', default: 1, kind: range(0.1, 10, 0.1, '×'), help: 'Trees, rocks and bushes grow back after this many times the normal delay.' },
-  { key: 'animalCount', label: 'Starting animals', group: 'Animals', default: 1, kind: range(0, 5, 0.1, '×'), help: 'Applies to new worlds.' },
-  { key: 'breedInterval', label: 'Mating check every', group: 'Animals', default: 45, kind: range(5, 600, 5, 's') },
-  { key: 'breedChance', label: 'Mating chance per check', group: 'Animals', default: 0.4, kind: range(0, 1, 0.05) },
-  { key: 'mateDistance', label: 'Mating distance', group: 'Animals', default: 4, kind: range(1, 20, 0.5, 'm'), help: 'A male and a female must be this close to mate.' },
-  { key: 'courtDistance', label: 'Courtship distance', group: 'Animals', default: 25, kind: range(0, 80, 1, 'm'), help: 'A male this close to a free female follows her until they are close enough.' },
-  { key: 'gestationSeconds', label: 'Gestation', group: 'Animals', default: 120, kind: range(0, 1200, 10, 's') },
-  { key: 'breedCooldownSeconds', label: 'Rest after giving birth', group: 'Animals', default: 300, kind: range(0, 3600, 30, 's') },
-  { key: 'growTime', label: 'Time to grow up', group: 'Animals', default: 1, kind: range(0.1, 5, 0.1, '×') },
-  { key: 'maxAnimals', label: 'Animal limit', group: 'Animals', default: 0, kind: range(0, 400, 10), help: '0 = no limit. Above it, deer, boars and wolves stop mating (keeps a big herd from slowing the game down).' },
-  { key: 'animalDamage', label: 'Animal bite damage', group: 'Animals', default: 1, kind: range(0, 5, 0.1, '×') },
-  { key: 'animalHealth', label: 'Animal toughness', group: 'Animals', default: 1, kind: range(0.2, 5, 0.1, '×'), help: 'How many hits animals take to kill.' },
-  { key: 'rainFrequency', label: 'Rain frequency', group: 'Time & weather', default: 1, kind: range(0, 3, 0.1, '×') },
-  { key: 'staminaRegen', label: 'Stamina recovery', group: 'Survival', default: 1, kind: range(0.2, 5, 0.1, '×') },
-  { key: 'craftSpeed', label: 'Crafting speed', group: 'Player', default: 1, kind: range(0.2, 10, 0.1, '×') },
-  { key: 'toolDurability', label: 'Tool durability', group: 'Player', default: 1, kind: range(0.2, 10, 0.1, '×'), help: 'Tools and weapons last this many times longer.' },
-];
-
 function defaultsOf<T>(defs: readonly SettingDef[]): T {
   return Object.fromEntries(defs.map((d) => [d.key, d.default])) as T;
 }
 
 export const DEFAULT_GRAPHICS: Readonly<GraphicsSettings> = Object.freeze(defaultsOf<GraphicsSettings>(GRAPHICS_DEFS));
-export const DEFAULT_SIM: Readonly<SimSettings> = Object.freeze(defaultsOf<SimSettings>(SIM_DEFS));
 export const DEFAULT_CONTROLS: Readonly<ControlSettings> = Object.freeze(defaultsOf<ControlSettings>(CONTROL_DEFS));
 
 export interface AllSettings {
   graphics: GraphicsSettings;
-  sim: SimSettings;
   controls: ControlSettings;
 }
-
-/** Current simulation settings, read by the systems every tick. */
-export const SIM: SimSettings = { ...DEFAULT_SIM };
 
 /**
  * Validates untrusted values (local storage, the settings form) against
@@ -201,9 +133,4 @@ export function sanitize<T>(defs: readonly SettingDef[], raw: unknown): T {
     }
   }
   return out as T;
-}
-
-/** Replaces the live simulation settings. */
-export function applySim(values: Partial<SimSettings>): void {
-  Object.assign(SIM, sanitize<SimSettings>(SIM_DEFS, { ...SIM, ...values }));
 }

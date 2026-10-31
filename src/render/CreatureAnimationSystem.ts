@@ -61,7 +61,7 @@ export class CreatureAnimationSystem implements System {
       });
       if (rig.head) {
         const state = world.get(e, AIBrain)?.blackboard.state;
-        const grazing = c.species !== 'wolf' && rig.speed < 0.15 && state === 'patrol';
+        const grazing = c.species !== 'wolf' && rig.speed < 0.15 && (state === 'patrol' || state === 'feed');
         const target = grazing ? 0.75 + Math.sin(rig.t * 0.9) * 0.1 : Math.sin(rig.phase * 2) * 0.06 * (0.3 + run) - run * 0.15;
         rig.head.rotation.x += (target - rig.head.rotation.x) * Math.min(1, dt * 4);
         rig.head.rotation.y = Math.sin(rig.t * 0.7 + e) * (grazing ? 0.15 : 0.05);

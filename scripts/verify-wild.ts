@@ -24,8 +24,7 @@ import { BuildingGrid } from '../src/systems/building/BuildingGrid';
 import { InventoryGrid } from '../src/systems/inventory/InventoryGrid';
 import { StationSystem } from '../src/systems/StationSystem';
 import { bedSpawnPoint, chooseBed, dropBelongings, revive } from '../src/systems/Respawn';
-import { BREED_TUNING, BreedingSystem, applyGrowth, breedState, growthScale } from '../src/systems/ai/BreedingSystem';
-import { SIM } from '../src/data/settings';
+import { BREEDING, BREED_TUNING, BreedingSystem, applyGrowth, breedState, growthScale } from '../src/systems/ai/BreedingSystem';
 
 declare const process: { exit(code: number): never };
 let failures = 0;
@@ -415,10 +414,10 @@ async function main(): Promise<void> {
     let born = 0;
     events.on('creature:born', () => born++);
     const run = (sec: number): void => { for (let t = 0; t < sec; t += 1) breed.fixedUpdate(world, 1); };
-    run(SIM.breedInterval * 3);
+    run(BREED_TUNING.interval * 3);
     const pregnant = breedState(world, doe).pregnant !== undefined;
     check('a male and a female close together mate; the fawn comes after a gestation', pregnant && born === 0, `pregnant ${pregnant}, ${born} born`);
-    run(SIM.gestationSeconds + 1);
+    run(BREEDING.deer!.gestation + 1);
     const deer = [...world.query(Creature)].filter((e) => world.require(e, Creature).species === 'deer');
     check('…then she gives birth next to her and rests before mating again', deer.length > 2 && breedState(world, doe).rest !== undefined && breedState(world, doe).pregnant === undefined, `${deer.length} deer`);
     const boars = [...world.query(Creature)].filter((e) => world.require(e, Creature).species === 'boar');
@@ -430,9 +429,9 @@ async function main(): Promise<void> {
     world.require(baby, Creature).growth = BREED_TUNING.birthGrowth;
     applyGrowth(world, baby);
     const small = { scale: growthScale(world.require(baby, Creature)), hp: world.require(baby, Creature).maxHealth };
-    run(300);
+    run(500);
     const mid = growthScale(world.require(baby, Creature));
-    run(400);
+    run(600);
     const kb = world.require(baby, Creature);
     check('babies are born small and grow little by little into adults', small.scale < 0.5 && mid > small.scale && mid < 1 && kb.growth === undefined && kb.maxHealth === 40,
       `scale ${small.scale.toFixed(2)} → ${mid.toFixed(2)} → 1, hp ${small.hp} → ${kb.maxHealth}`);

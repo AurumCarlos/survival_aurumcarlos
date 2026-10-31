@@ -3,7 +3,6 @@ import { SpatialHash } from '../core/SpatialHash';
 import { AIBrain, Creature, Transform, type CreatureSpecies } from '../components';
 import { defaultApex } from '../systems/ai/ApexSystem';
 import type { ResourceKind } from '../data/schema';
-import { SIM } from '../data/settings';
 import { spawnCreature, spawnResource } from '../entities/factories';
 import { NavGrid } from '../systems/ai/nav/NavGrid';
 import { creatureBudget, type MapConfig } from './MapConfig';
@@ -60,7 +59,6 @@ export function spawnInitialCreatures(world: World, bundle: TerrainBundle, map: 
   const { terrain } = bundle;
   const rand = mulberry32(map.seed + 99);
   const budget = creatureBudget(map);
-  const k = SIM.animalCount; // settings: more or fewer animals in new worlds
   const out: Entity[] = [];
   const spawnSome = (species: CreatureSpecies, count: number, minDist: number): void => {
     let placed = 0, tries = 0;
@@ -74,9 +72,9 @@ export function spawnInitialCreatures(world: World, bundle: TerrainBundle, map: 
     }
   };
   const minDist = Math.min(45, terrain.cfg.size * 0.2);
-  spawnSome('wolf', Math.round(budget.wolf * k), minDist);
-  spawnSome('deer', Math.round(budget.deer * k), minDist * 0.6);
-  spawnSome('boar', Math.round(budget.boar * k), minDist * 0.8);
+  spawnSome('wolf', budget.wolf, minDist);
+  spawnSome('deer', budget.deer, minDist * 0.6);
+  spawnSome('boar', budget.boar, minDist * 0.8);
   out.push(...spawnApexPredators(world, bundle, map, []));
   return out;
 }

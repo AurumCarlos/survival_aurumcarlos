@@ -151,15 +151,17 @@ async function main(): Promise<void> {
     const wolf = spawnCreature(world, 'wolf', { x: far.x, y: 0, z: far.z }, 5, 10);
     world.require(wolf, Cullable).visible = false;
     const start = { ...world.require(wolf, Transform).position };
-    const hpBefore = world.require(wolf, AIBrain).blackboard.waypointIndex;
-    for (let t = 0; t <= 5000; t += 1000 / 60) loop.tick(t);
-    const p = world.require(wolf, Transform).position;
-    check('dormant wolf does not move, state preserved', p.x === start.x && p.z === start.z && world.require(wolf, AIBrain).blackboard.waypointIndex === hpBefore,
-      `lod=${world.require(wolf, AIBrain).lod}, active=${lod.stats.active}, dormant=${lod.stats.dormant}`);
+    for (let t = 0; t <= 8000; t += 1000 / 60) loop.tick(t);
+    const tr = world.require(wolf, Transform);
+    const moved = Math.hypot(tr.position.x - start.x, tr.position.z - start.z);
+    check('a dormant wolf keeps living (patrols at a reduced think rate, no stale interpolation)',
+      world.require(wolf, AIBrain).lod === 'dormant' && moved > 0.5 && tr.prevPosition.x === tr.position.x && tr.prevPosition.z === tr.position.z,
+      `lod=${world.require(wolf, AIBrain).lod}, moved ${moved.toFixed(1)} m, dormant=${lod.stats.dormant}`);
+    const mid = { ...tr.position };
     world.require(wolf, Cullable).visible = true;
-    for (let t = 5000; t <= 10000; t += 1000 / 60) loop.tick(t);
+    for (let t = 8000; t <= 13000; t += 1000 / 60) loop.tick(t);
     const q = world.require(wolf, Transform).position;
-    check('coming on-screen wakes it up exactly where it was', Math.hypot(q.x - start.x, q.z - start.z) > 1, `moved ${Math.hypot(q.x - start.x, q.z - start.z).toFixed(1)} m`);
+    check('coming on-screen it carries on from where it was', world.require(wolf, AIBrain).lod === 'active' && Math.hypot(q.x - mid.x, q.z - mid.z) > 1, `moved ${Math.hypot(q.x - mid.x, q.z - mid.z).toFixed(1)} m`);
   }
 
   // ─────────────────────────────────────────────────────────────────────────

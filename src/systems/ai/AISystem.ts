@@ -1,14 +1,15 @@
 import { itemDef } from '../../data/items';
-import { SIM } from '../../data/settings';
 import type { Entity, System, World } from '../../core/ecs/World';
 import type { EventBus } from '../../core/EventBus';
+import type { SpatialHash } from '../../core/SpatialHash';
 import {
-  AIBrain, Creature, HeatSource, PlayerControlled, SurvivorC, Transform, type AIState, type Blackboard,
+  AIBrain, Creature, HeatSource, PlayerControlled, ResourceC, SurvivorC, Transform, type AIState, type Blackboard,
 } from '../../components';
 import type { Vec3 } from '../../data/schema';
 import type { DayNightCycle } from '../DayNightCycle';
 import type { SurvivalStatusManager } from '../SurvivalStatusManager';
 import { Action, Condition, Selector, Sequence, type BTContext, type BTNode, type BTStatus } from './BehaviorTree';
+import { ECOLOGY, biteResource, ecoState, isEater, killCreature, nearestFood } from './Ecology';
 import type { PathProvider } from './nav/FlowFieldService';
 import { wrapAngle } from './PerceptionSystem';
 
@@ -19,8 +20,17 @@ export interface AIServices {
   cycle: DayNightCycle;
   survival: SurvivalStatusManager;
   events: EventBus;
+  /** Harvestables by position: what deer and boars eat, and carcasses (tests may leave it out: no food). */
+  resources?: SpatialHash;
+  /** Wolves leave deer alone at or below this many (see deerRefuge()); default ECOLOGY.minRefuge. */
+  deerRefuge?: number;
   /** Resolved once per tick. */
   player: Entity | undefined;
+  /** Live deer, what wolves hunt (deer and piglets), piglets alone, and wolves: gathered once per tick. */
+  deer: Entity[];
+  prey: Entity[];
+  piglets: Entity[];
+  wolves: Entity[];
 }
 
 type Ctx = BTContext<AIServices>;
@@ -32,6 +42,11 @@ const FLEE_MIN_TIME = 4;
 const FLEE_SAFE_DISTANCE = 35;
 const FIRE_FEAR_MARGIN = 3;
 const STUCK_GIVE_UP = 2.5; // seconds without progress → treat the target as reached
+const EAT_REACH = 1.7;
+/** Seconds of walking toward food before deciding it's out of reach. */
+const TRAVEL_GIVE_UP = 25;
+/** Off-screen, far-away animals think 1 tick in DORMANT_EVERY (with a longer dt), so the food chain goes on everywhere. */
+const DORMANT_EVERY = 4;
 
 // ---------------------------------------------------------------------------
 // Conditions
@@ -70,6 +85,37 @@ const nearFireAtNight = new Condition<AIServices>('fire-at-night', (c) => {
 
 const stillFleeing = new Condition<AIServices>('still-fleeing', (c) => c.bb.fleeTimer > 0);
 
+/** A deer (or piglet) that sees a wolf coming (close, or running at it) bolts. */
+const predatorNear = new Condition<AIServices>('predator-near', (c) => {
+  const k = cr(c);
+  if (k.species !== 'deer' && !(k.species === 'boar' && k.growth !== undefined)) return false;
+  const p = pos(c);
+  let best = Infinity, from: Vec3 | null = null;
+  for (const w of c.services.wolves) {
+    const wbb = c.world.require(w, AIBrain).blackboard;
+    const wp = c.world.require(w, Transform).position;
+    const d = Math.hypot(wp.x - p.x, wp.z - p.z);
+    const running = wbb.state === 'stalk' && d < ECOLOGY.wolf.sprintAt + 1;
+    if (d < (running ? ECOLOGY.notice.running : ECOLOGY.notice.walking) && d < best) {
+      best = d;
+      from = wp;
+    }
+  }
+  if (!from) return false;
+  c.bb.fleeFrom = { x: from.x, y: from.y, z: from.z };
+  return true;
+});
+
+/** Hungry, or already eating and not full yet (so it doesn't stop after one bite). */
+const hungry = new Condition<AIServices>('hungry', (c) => {
+  const k = cr(c);
+  if (!isEater(k.species) || !c.services.resources) return false;
+  const tune = ECOLOGY[k.species];
+  const food = ecoState(c.world, c.entity).food;
+  const busy = c.bb.state === 'graze' || c.bb.state === 'feed' || c.bb.state === 'stalk';
+  return food < (busy ? tune.full : tune.hungry);
+});
+
 const seesPlayer = new Condition<AIServices>('sees-player', (c) => {
   const k = cr(c);
   return k.temperament !== 'prey' && playerAlive(c) && k.perception.canSeeTarget && k.perception.awareness >= 1;
@@ -91,6 +137,13 @@ const flee = new Action<AIServices>('flee', (c) => {
   const threat = c.bb.fleeFrom ?? k.perception.lastKnownTargetPos ?? playerPos(c);
   if (c.bb.fleeTimer <= 0) c.bb.fleeTimer = FLEE_MIN_TIME;
   c.bb.fleeTimer -= c.dt;
+  // Prey tire: a sprint can't last (that's how wolves catch deer).
+  let speed = k.runSpeed;
+  if (isEater(k.species)) {
+    const eco = ecoState(c.world, c.entity), st = ECOLOGY.stamina;
+    eco.tired += c.dt;
+    speed *= Math.max(st.min, 1 - Math.max(0, eco.tired - st.fresh) * st.fade) * (eco.food === 0 ? 0.8 : 1);
+  }
   if (!threat) return 'success';
   const dx = p.x - threat.x, dz = p.z - threat.z;
   const d = Math.hypot(dx, dz) || 1;
@@ -105,11 +158,11 @@ const flee = new Action<AIServices>('flee', (c) => {
     const cos = Math.cos(ang), sin = Math.sin(ang);
     const tx = p.x + (ax * cos - az * sin) * 10, tz = p.z + (ax * sin + az * cos) * 10;
     if (c.services.paths.isWalkable(tx, tz)) {
-      steer(c, tx, tz, k.runSpeed);
+      steer(c, tx, tz, speed);
       return 'running';
     }
   }
-  steer(c, p.x + ax * 10, p.z + az * 10, k.runSpeed);
+  steer(c, p.x + ax * 10, p.z + az * 10, speed);
   return 'running';
 });
 const FLEE_ANGLES = [0, 0.6, -0.6, 1.2, -1.2, 1.9, -1.9] as const;
@@ -131,7 +184,7 @@ const chase = new Action<AIServices>('chase', (c) => {
       const s = c.world.require(c.services.player, SurvivorC);
       // Armour absorbs part of the bite (Flak halves it) and makes bleeding rarer.
       const armor = s.equipped.body ? (itemDef(s.equipped.body.item).wearable?.armor ?? 0) : 0;
-      const dmg = k.attackDamage * (1 - armor) * SIM.animalDamage;
+      const dmg = k.attackDamage * (1 - armor);
       s.vitals.health = Math.max(0, s.vitals.health - dmg);
       c.services.events.emit('player:damaged', { entity: c.services.player, amount: dmg, source: k.species });
       // Bites have a chance to cause bleeding; the status manager owns the effect.
@@ -202,6 +255,189 @@ const patrol = new Action<AIServices>('patrol', (c) => {
   return 'running';
 });
 
+/**
+ * Deer and boars: walk to the nearest ripe plant of their diet and eat it,
+ * bite by bite, until full or it's bare. With nothing in reach they wander
+ * off to look elsewhere. Their patrol range follows the food they find.
+ */
+const graze = new Action<AIServices>('graze', (c) => {
+  const k = cr(c);
+  if (k.species !== 'deer' && k.species !== 'boar') return 'failure';
+  const tune = ECOLOGY[k.species];
+  const eco = ecoState(c.world, c.entity);
+  const p = pos(c);
+  const r = eco.target !== null ? c.world.get(eco.target, ResourceC) : undefined;
+  if (!r || r.hitPoints <= 0 || !tune.diet.includes(r.kind)) {
+    if (c.bb.state === 'graze' && c.bb.searchPoint && !lookAround(c)) return wander(c, k.walkSpeed);
+    eco.target = nearestFood(c.world, c.services.resources!, p.x, p.z, tune.search, tune.diet, eco.skip ?? null);
+    if (eco.target === null) return wander(c, k.walkSpeed);
+    c.bb.stuckTimer = 0;
+    c.bb.searchPoint = null;
+    eco.biteTimer = 0;
+    return 'running';
+  }
+  return eatAt(c, r.position, k.walkSpeed, tune.biteSeconds, tune.perBite, tune.full);
+});
+
+/**
+ * Hungry wolves: eat a carcass they can smell; otherwise pick the nearest
+ * deer, creep up at walking pace and sprint the last stretch. A chase that
+ * drags on is abandoned (the deer got away) and the wolf rests before the
+ * next one. A deer killed becomes a carcass, which the wolf then eats —
+ * and so can the rest of the pack, or the player.
+ */
+const forage = new Action<AIServices>('forage', (c) => {
+  const k = cr(c);
+  if (k.species !== 'wolf') return 'failure'; // boars share the predator tree but graze
+  const tune = ECOLOGY.wolf;
+  const eco = ecoState(c.world, c.entity);
+  const p = pos(c);
+  eco.huntRest = Math.max(0, eco.huntRest - c.dt);
+  k.attackTimer = Math.max(0, k.attackTimer - c.dt);
+
+  // Current target still good?
+  const t = eco.target;
+  const carcass = t !== null ? c.world.get(t, ResourceC) : undefined;
+  if (carcass && carcass.kind === 'carcass' && carcass.hitPoints > 0) {
+    return eatAt(c, carcass.position, k.walkSpeed * 1.6, tune.biteSeconds, tune.perBite, tune.full);
+  }
+  const prey = t !== null ? c.world.get(t, Creature) : undefined;
+  if (prey && (prey.species === 'deer' || prey.species === 'boar') && prey.health > 0 && eco.huntRest === 0) return stalk(c, t!);
+
+  // New target: food first, then a deer (if there are enough of them to find).
+  eco.chase = 0;
+  if (c.bb.state === 'graze' && c.bb.searchPoint && !lookAround(c)) return wander(c, k.walkSpeed * 1.2);
+  eco.target = nearestFood(c.world, c.services.resources!, p.x, p.z, tune.search, CARCASS_DIET, eco.skip ?? null);
+  eco.biteTimer = 0;
+  if (eco.target === null && eco.huntRest === 0) {
+    let best: number = tune.scent;
+    for (const d of c.services.deer.length > (c.services.deerRefuge ?? ECOLOGY.minRefuge) ? c.services.prey : c.services.piglets) {
+      const dp = c.world.require(d, Transform).position;
+      const dist = Math.hypot(dp.x - p.x, dp.z - p.z);
+      if (dist < best) { best = dist; eco.target = d; }
+    }
+  }
+  if (eco.target === null) return wander(c, k.walkSpeed * 1.2);
+  c.bb.searchPoint = null;
+  return 'running';
+});
+const CARCASS_DIET = ['carcass'] as const;
+
+function stalk(c: Ctx, deer: Entity): BTStatus { // deer, or a piglet
+  const k = cr(c);
+  const tune = ECOLOGY.wolf;
+  const eco = ecoState(c.world, c.entity);
+  const p = pos(c);
+  const dp = c.world.require(deer, Transform).position;
+  const d = Math.hypot(dp.x - p.x, dp.z - p.z);
+  setState(c, 'stalk');
+  if (d > tune.scent * 1.5) {
+    eco.target = null; // lost it
+    return 'running';
+  }
+  if (d > tune.sprintAt && eco.chase === 0) {
+    steer(c, dp.x, dp.z, k.walkSpeed * 1.3); // creeping up
+    return 'running';
+  }
+  eco.chase += c.dt;
+  if (eco.chase > tune.chaseSeconds) {
+    eco.target = null;
+    eco.chase = 0;
+    eco.huntRest = tune.huntRest;
+    return 'running';
+  }
+  if (d <= k.attackRange + 0.3) {
+    face(c, dp.x, dp.z);
+    if (k.attackTimer === 0) {
+      k.attackTimer = k.attackCooldown;
+      const prey = c.world.require(deer, Creature);
+      prey.health -= k.attackDamage * tune.biteVsAnimals;
+      c.services.events.emit('creature:hit', { entity: deer, amount: k.attackDamage * tune.biteVsAnimals, killed: prey.health <= 0 });
+      if (prey.health <= 0) {
+        killCreature(c.world, deer, c.services.resources!, c.services.events, 'predator');
+        eco.target = deer; // the same entity is now its carcass
+        eco.chase = 0;
+      }
+    }
+  }
+  steer(c, dp.x, dp.z, k.runSpeed);
+  return 'running';
+}
+
+/** Walk to `at`, then eat one bite every `biteSeconds` until `full` (or nothing is left). */
+function eatAt(c: Ctx, at: Vec3, speed: number, biteSeconds: number, perBite: number, full: number): BTStatus {
+  const eco = ecoState(c.world, c.entity);
+  const p = pos(c);
+  const d = Math.hypot(at.x - p.x, at.z - p.z);
+  if (d > EAT_REACH) {
+    eco.biteTimer += c.dt; // time spent getting there
+    if (c.bb.stuckTimer < STUCK_GIVE_UP && eco.biteTimer < TRAVEL_GIVE_UP) {
+      setState(c, 'graze');
+      steer(c, at.x, at.z, speed);
+      return 'running';
+    }
+    if (d > EAT_REACH + 1.5) {
+      // Can't get there (up a cliff, across water, jittering against a
+      // rock): forget it and go look somewhere else.
+      eco.skip = eco.target;
+      eco.target = null;
+      c.bb.stuckTimer = 0;
+      c.bb.searchPoint = null;
+      return wander(c, speed);
+    }
+  }
+  if (c.bb.state !== 'feed') eco.biteTimer = 0;
+  setState(c, 'feed');
+  face(c, at.x, at.z);
+  eco.biteTimer += c.dt;
+  if (eco.biteTimer < biteSeconds) return 'running';
+  eco.biteTimer = 0;
+  if (eco.target === null || !biteResource(c.world, eco.target, c.services.events)) {
+    eco.target = null;
+    return 'running';
+  }
+  eco.food = Math.min(1, eco.food + perBite);
+  // Its range drifts toward where the food is.
+  const home = c.bb.home, dx = (at.x - home.x) * 0.5, dz = (at.z - home.z) * 0.5;
+  home.x += dx;
+  home.z += dz;
+  for (const w of c.bb.waypoints) {
+    w.x += dx;
+    w.z += dz;
+  }
+  if (eco.food >= full) {
+    eco.target = null;
+    return 'success';
+  }
+  return 'running';
+}
+
+/** While roaming for food, look around about twice a second (searches aren't free). */
+function lookAround(c: Ctx): boolean {
+  return rand(c.bb) < c.dt * 2;
+}
+
+/** Nothing to eat in reach: head somewhere new and look again on arrival. */
+function wander(c: Ctx, speed: number): BTStatus {
+  setState(c, 'graze');
+  const p = pos(c);
+  const sp = c.bb.searchPoint;
+  if (!sp || Math.hypot(sp.x - p.x, sp.z - p.z) < 2 || c.bb.stuckTimer > STUCK_GIVE_UP) {
+    c.bb.stuckTimer = 0;
+    for (let i = 0; i < 6; i++) {
+      const a = rand(c.bb) * Math.PI * 2, r = 20 + rand(c.bb) * 25;
+      const x = p.x + Math.cos(a) * r, z = p.z + Math.sin(a) * r;
+      if (c.services.paths.isWalkable(x, z)) {
+        c.bb.searchPoint = { x, y: p.y, z };
+        break;
+      }
+    }
+    return 'running';
+  }
+  steer(c, sp.x, sp.z, speed);
+  return 'running';
+}
+
 // ---------------------------------------------------------------------------
 // Trees (shared, stateless). Priority order = top to bottom.
 // ---------------------------------------------------------------------------
@@ -210,11 +446,14 @@ export const BEHAVIOR_TREES: Readonly<Record<string, BTNode<AIServices>>> = {
   predator: new Selector('root', [
     new Sequence('flee', [new Selector('flee?', [isHurt, nearFireAtNight, stillFleeing]), flee]),
     new Sequence('chase', [seesPlayer, chase]),
+    new Sequence('forage', [hungry, forage]),
+    new Sequence('graze', [hungry, graze]),
     new Sequence('hunt', [hasFreshLead, hunt]),
     patrol,
   ]),
   prey: new Selector('root', [
-    new Sequence('flee', [new Selector('flee?', [isHurt, preySpooked, stillFleeing]), flee]),
+    new Sequence('flee', [new Selector('flee?', [isHurt, preySpooked, predatorNear, stillFleeing]), flee]),
+    new Sequence('graze', [hungry, graze]),
     patrol,
   ]),
 };
@@ -228,23 +467,51 @@ export const BEHAVIOR_TREES: Readonly<Record<string, BTNode<AIServices>>> = {
 export class AISystem implements System {
   readonly name = 'ai';
 
-  constructor(private readonly services: Omit<AIServices, 'player'>) {}
+  private tick = 0;
+  private readonly deer: Entity[] = [];
+  private readonly prey: Entity[] = [];
+  private readonly piglets: Entity[] = [];
+  private readonly wolves: Entity[] = [];
+
+  constructor(private readonly services: Omit<AIServices, 'player' | 'deer' | 'prey' | 'piglets' | 'wolves'>) {}
 
   fixedUpdate(world: World, dt: number): void {
-    const services: AIServices = { ...this.services, player: world.first(PlayerControlled, SurvivorC, Transform) };
+    this.deer.length = this.prey.length = this.piglets.length = this.wolves.length = 0;
+    for (const e of world.query(AIBrain, Creature, Transform)) {
+      const k = world.require(e, Creature);
+      if (k.health <= 0) continue;
+      if (k.species === 'deer') {
+        this.deer.push(e);
+        this.prey.push(e);
+      } else if (k.species === 'boar' && k.growth !== undefined) {
+        this.piglets.push(e); // grown boars fight back; wolves leave them be
+        this.prey.push(e);
+      } else if (k.species === 'wolf' && k.temperament === 'predator') this.wolves.push(e);
+    }
+    const services: AIServices = {
+      ...this.services, player: world.first(PlayerControlled, SurvivorC, Transform),
+      deer: this.deer, prey: this.prey, piglets: this.piglets, wolves: this.wolves,
+    };
     services.paths.beginTick();
+    this.tick++;
     for (const e of world.query(AIBrain, Creature, Transform)) {
       const brain = world.require(e, AIBrain);
       const k = world.require(e, Creature);
       const t = world.require(e, Transform);
       if (k.health <= 0) continue;
+      let step = dt;
       if (brain.lod === 'dormant') {
         // Keep prev == current so the renderer doesn't keep blending a stale step.
         copyVec(t.prevPosition, t.position);
-        continue;
+        // Off-screen and far: think at a quarter of the rate (staggered), so
+        // animals still eat, hunt and wander where the player isn't looking.
+        if ((this.tick + e) % DORMANT_EVERY !== 0) continue;
+        step = dt * DORMANT_EVERY;
       }
       const tree = BEHAVIOR_TREES[brain.tree];
       if (!tree) continue;
+      const eco = brain.blackboard.eco;
+      if (eco && brain.blackboard.state !== 'flee') eco.tired = Math.max(0, eco.tired - step * ECOLOGY.stamina.recover);
 
       // Snapshot for render interpolation (see RenderSyncSystem).
       copyVec(t.prevPosition, t.position);
@@ -253,9 +520,10 @@ export class AISystem implements System {
       t.prevRotation.z = t.rotation.z;
       t.prevRotation.w = t.rotation.w;
 
-      const ctx: Ctx = { world, entity: e, bb: brain.blackboard, dt, services };
+      const ctx: Ctx = { world, entity: e, bb: brain.blackboard, dt: step, services };
       const before = brain.blackboard.state;
       tree.tick(ctx);
+      if (!world.has(e, Creature)) continue; // starved or killed this tick
       if (brain.blackboard.state !== before) {
         services.events.emit('ai:state-changed', { entity: e, from: before, to: brain.blackboard.state });
       }

@@ -8,15 +8,14 @@ import { BuilderC } from '../systems/building/BuildingSystem';
 import { ObjectPool } from '../core/ObjectPool';
 import type { SpatialHash } from '../core/SpatialHash';
 import {
-  AIBrain, Creature, Cullable, PlayerControlled, ResourceC, StealthState, SurvivorC, Transform,
+  Creature, PlayerControlled, StealthState, SurvivorC, Transform,
 } from '../components';
-import { CARCASS_OF, itemDef, makeResource } from '../data/items';
+import { itemDef } from '../data/items';
+import { killCreature } from '../systems/ai/Ecology';
 import { MELEE_REACH } from '../data/combat';
-import { SIM } from '../data/settings';
 import type { ItemStack } from '../data/schema';
 import { arrowGeometry, flatMaterial, spearGeometry } from '../render/LowPolyFactory';
 import { InventoryGrid } from '../systems/inventory/InventoryGrid';
-import { RenderObject } from '../render/Renderer';
 import { Groups, type PhysicsWorld } from './PhysicsWorld';
 
 interface Projectile {
@@ -209,7 +208,7 @@ export class CombatSystem implements System {
         return;
       }
       this.events.emit('inventory:changed', { entity: player });
-      if (held.durability !== undefined) held.durability -= 1 / SIM.toolDurability;
+      if (held.durability !== undefined) held.durability -= 1;
     }
     const p = this.pool.acquire();
     if (!p) return;
@@ -250,7 +249,7 @@ export class CombatSystem implements System {
     const target = this.meleeTarget(world, pp, pc.yaw, reach);
     if (target !== null) {
       this.damageCreature(world, target, damage, pp);
-      if (held?.durability !== undefined) held.durability -= 1 / SIM.toolDurability;
+      if (held?.durability !== undefined) held.durability -= 1;
     }
     const st = world.get(player, StealthState);
     if (st) st.pendingNoise = Math.max(st.pendingNoise, 8);
@@ -308,7 +307,6 @@ export class CombatSystem implements System {
 
   private damageCreature(world: World, e: Entity, amount: number, from: { x: number; y: number; z: number }): void {
     const c = world.require(e, Creature);
-    amount /= SIM.animalHealth; // settings: tougher or frailer animals
     c.health -= amount;
     const killed = c.health <= 0;
     // Getting hit always reveals the attacker's position.
@@ -328,17 +326,6 @@ export class CombatSystem implements System {
     if (!killed) return;
 
     // Death: the creature becomes a harvestable carcass.
-    const t = world.require(e, Transform);
-    world.remove(e, AIBrain);
-    world.remove(e, Creature);
-    world.remove(e, Cullable);
-    world.add(e, ResourceC, makeResource(e, 'carcass', { ...t.position }, CARCASS_OF[c.species] ?? -1));
-    this.resourceIndex.insert(e, t.position.x, t.position.z);
-    const ro = world.get(e, RenderObject);
-    if (ro) {
-      ro.object.rotation.z = Math.PI / 2;
-      ro.object.position.y = t.position.y + 0.25;
-      ro.interpolate = false;
-    }
+    killCreature(world, e, this.resourceIndex, this.events, 'player');
   }
 }

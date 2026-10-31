@@ -1,6 +1,6 @@
 import {
-  CONTROL_DEFS, DEFAULT_CONTROLS, DEFAULT_GRAPHICS, DEFAULT_SIM, GRAPHICS_DEFS, SIM_DEFS, sanitize,
-  type AllSettings, type ControlSettings, type GraphicsSettings, type SimSettings,
+  CONTROL_DEFS, DEFAULT_CONTROLS, DEFAULT_GRAPHICS, GRAPHICS_DEFS, sanitize,
+  type AllSettings, type ControlSettings, type GraphicsSettings,
 } from '../data/settings';
 
 const KEY = 'survival.settings.v1';
@@ -21,7 +21,6 @@ export function loadSettings(): AllSettings {
   const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
   return {
     graphics: sanitize<GraphicsSettings>(GRAPHICS_DEFS, o['graphics'] ?? DEFAULT_GRAPHICS),
-    sim: sanitize<SimSettings>(SIM_DEFS, o['sim'] ?? DEFAULT_SIM),
     controls: sanitize<ControlSettings>(CONTROL_DEFS, o['controls'] ?? DEFAULT_CONTROLS),
   };
 }

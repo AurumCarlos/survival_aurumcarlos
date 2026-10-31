@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "typecheck:core": "tsc -p tsconfig.core.json",
     "sim": "tsx scripts/simulate-night.ts",
-    "test": "tsx scripts/simulate-night.ts && tsx scripts/verify-systems.ts && tsx scripts/verify-building.ts && tsx scripts/verify-gameplay.ts && tsx scripts/verify-crafting.ts && tsx scripts/verify-wild.ts && tsx scripts/verify-world.ts && tsx scripts/verify-testmode.ts && tsx scripts/verify-settings.ts"
+    "eco": "tsx scripts/simulate-ecology.ts",
+    "test": "tsx scripts/simulate-night.ts && tsx scripts/verify-systems.ts && tsx scripts/verify-building.ts && tsx scripts/verify-gameplay.ts && tsx scripts/verify-crafting.ts && tsx scripts/verify-wild.ts && tsx scripts/verify-world.ts && tsx scripts/verify-testmode.ts && tsx scripts/verify-settings.ts && tsx scripts/verify-ecology.ts"
   },
   "dependencies": {
     "cannon-es": "^0.20.0",

@@ -4,7 +4,6 @@ import { HeatSource, Structure, SurvivorC, Transform } from '../../components';
 import { STRUCTURES } from '../../data/stations';
 import { RECIPES_BY_ID, type CraftingStation } from '../../data/recipes';
 import { itemDef } from '../../data/items';
-import { SIM } from '../../data/settings';
 import { CraftingEngine } from './CraftingEngine';
 import { InventoryGrid } from './InventoryGrid';
 
@@ -134,7 +133,7 @@ export class CraftingSystem implements System {
       job.waiting = recipe.station !== 'hands' && !this.stationsNear(world, e).has(recipe.station);
       if (job.waiting) continue;
 
-      job.elapsed += dt * s.modifiers.gatherSpeed * SIM.craftSpeed;
+      job.elapsed += dt * s.modifiers.gatherSpeed;
       if (job.elapsed < job.duration) continue;
 
       // Tools and weapons go straight into a free hotbar slot, ready to use.

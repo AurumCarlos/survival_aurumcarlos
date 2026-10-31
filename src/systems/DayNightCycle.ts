@@ -1,5 +1,4 @@
 import { Perlin } from '../world/Noise';
-import { SIM } from '../data/settings';
 
 export interface DayNightConfig {
   /** Real seconds per in-game day. 20 min default: ~13 min day, ~7 min night. */
@@ -103,15 +102,9 @@ export class DayNightCycle {
     return c.meanTempC + daily + weather;
   }
 
-  /**
-   * Rain strength 0..1: slowly varying noise above a threshold. The rain
-   * frequency setting moves the threshold (×1 = the original weather, ×0 = never).
-   */
+  /** Rain strength 0..1: slowly varying noise above a threshold. */
   get rainIntensity(): number {
-    const f = SIM.rainFrequency;
-    if (f <= 0) return 0;
-    const threshold = 0.42 + (1 - f) * 0.25;
-    return clamp01((this.weatherNoise.noise2(this.hoursElapsed / 6, 9.3) - threshold) / 0.18);
+    return clamp01((this.weatherNoise.noise2(this.hoursElapsed / 6, 9.3) - 0.42) / 0.18);
   }
 
   get raining(): boolean {

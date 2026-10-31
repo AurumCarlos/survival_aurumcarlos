@@ -1,11 +1,10 @@
-import { CONTROL_DEFS, GRAPHICS_DEFS, SIM_DEFS, type AllSettings, type SettingDef } from '../data/settings';
+import { CONTROL_DEFS, GRAPHICS_DEFS, type AllSettings, type SettingDef } from '../data/settings';
 
-export type SettingsTab = 'graphics' | 'controls' | 'sim';
+export type SettingsTab = 'graphics' | 'controls';
 
 const TABS: ReadonlyArray<{ tab: SettingsTab; label: string; defs: readonly SettingDef[] }> = [
   { tab: 'graphics', label: 'Graphics', defs: GRAPHICS_DEFS },
   { tab: 'controls', label: 'Controls & audio', defs: CONTROL_DEFS },
-  { tab: 'sim', label: 'Simulation', defs: SIM_DEFS },
 ];
 
 /**

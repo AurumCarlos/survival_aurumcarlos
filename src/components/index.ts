@@ -205,7 +205,11 @@ export interface AIBrain {
 }
 export const AIBrain = defineComponent<AIBrain>('AIBrain');
 
-export type AIState = 'patrol' | 'chase' | 'hunt' | 'flee' | 'attack';
+/**
+ * `graze`: walking to food. `feed`: eating (berries, a carcass). `stalk`: a
+ * hungry wolf creeping up on / running down a deer.
+ */
+export type AIState = 'patrol' | 'chase' | 'hunt' | 'flee' | 'attack' | 'graze' | 'feed' | 'stalk';
 
 export interface Blackboard {
   state: AIState;
@@ -228,6 +232,29 @@ export interface Blackboard {
   apex?: ApexState;
   /** Breeding (BreedingSystem), saved with the blackboard: sex, and pregnancy / rest timers in seconds. */
   breed?: { sex: 'male' | 'female'; pregnant?: number; rest?: number };
+  /** Ecology (systems/ai/Ecology.ts), saved with the blackboard. */
+  eco?: EcoState;
+}
+
+/**
+ * An animal's belly and what it is going after. Entity references are only
+ * hints: they are checked every tick (a save reload renumbers entities).
+ */
+export interface EcoState {
+  /** 1 = full, 0 = starving (losing health). */
+  food: number;
+  /** Bush, plant, carcass or deer it is heading to. */
+  target: number | null;
+  /** Seconds since the last bite, or spent walking to the target. */
+  biteTimer: number;
+  /** A target it gave up on (out of reach): not picked again right away. */
+  skip?: number | null;
+  /** Seconds the current wolf chase has lasted. */
+  chase: number;
+  /** A wolf that lost its prey won't start another chase for this long. */
+  huntRest: number;
+  /** Seconds spent running from danger (prey tire). */
+  tired: number;
 }
 
 /**

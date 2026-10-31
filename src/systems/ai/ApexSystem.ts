@@ -4,7 +4,6 @@ import {
   AIBrain, Creature, PlayerControlled, SurvivorC, Transform, type ApexMode, type ApexState,
 } from '../../components';
 import { itemDef } from '../../data/items';
-import { SIM } from '../../data/settings';
 import type { Vec3 } from '../../data/schema';
 import { insideCave, type Cave } from '../../world/TerrainGenerator';
 import type { SurvivalStatusManager } from '../SurvivalStatusManager';
@@ -508,7 +507,7 @@ export class ApexSystem implements System {
   private hurtPlayer(world: World, player: Entity, k: Creature, bleedChance: number): void {
     const s = world.require(player, SurvivorC);
     const armor = s.equipped.body ? (itemDef(s.equipped.body.item).wearable?.armor ?? 0) : 0;
-    const dmg = k.attackDamage * (1 - armor) * SIM.animalDamage;
+    const dmg = k.attackDamage * (1 - armor);
     s.vitals.health = Math.max(0, s.vitals.health - dmg);
     if (Math.random() < bleedChance * (1 - armor)) this.s.survival.applyEffect(s, 'bleeding', 25, 'combat');
     this.s.events.emit('player:damaged', { entity: player, amount: dmg, source: k.species });

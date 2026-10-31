@@ -42,6 +42,10 @@ export interface GameEvents {
   'player:damaged': { entity: Entity; amount: number; source: string };
   /** A baby animal was born (the render layer gives it a mesh). */
   'creature:born': { entity: Entity; species: string };
+  /** An animal arrived from elsewhere on the island (keeps a species from dying out). */
+  'creature:arrived': { entity: Entity; species: string };
+  /** A creature died and became a carcass (killed by the player, a wolf, or starvation). */
+  'creature:died': { entity: Entity; species: string; cause: 'player' | 'predator' | 'starvation' };
   /** Short message for the player. */
   'ui:toast': { text: string; warn?: boolean };
 }

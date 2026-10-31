@@ -125,7 +125,7 @@ export class MainMenu {
             <button data-act="continue" ${m.save ? '' : 'disabled'}>Continue${m.save ? `<small>${escapeHtml(m.save.name)} · day ${m.save.day} · ${m.save.size} m · ${m.save.minutes} min · ${timeAgo(m.save.savedAt)}</small>` : '<small>No saved game</small>'}</button>
             <button data-act="saves">Load game<small>${m.saves.length ? `${m.saves.length} saved world${m.saves.length > 1 ? 's' : ''} — load, rename, copy, delete, import/export` : 'No saved worlds yet · import a save file'}</small></button>
             <button data-act="new" class="primary">New game</button>
-            <button data-act="settings">Settings<small>Graphics, frame rate, and every simulation setting</small></button>
+            <button data-act="settings">Settings<small>Graphics, frame rate, controls and sound</small></button>
             ${m.storageKind === 'memory' ? '<p class="warn-line">Saving is unavailable in this browser mode — progress will be lost on reload.</p>' : ''}
           </div>`;
         break;
@@ -303,7 +303,7 @@ export class MainMenu {
         this.settingsOpen = false;
         return this.render(this.state);
       case 'set-tab':
-        this.settingsTab = (['graphics', 'controls', 'sim'] as const).find((t) => t === target.dataset['tab']) ?? 'graphics';
+        this.settingsTab = (['graphics', 'controls'] as const).find((t) => t === target.dataset['tab']) ?? 'graphics';
         return this.render(this.state);
       case 'set-reset':
         this.h.onSettingsReset(this.settingsTab);

@@ -33,12 +33,12 @@ import { AILodSystem } from '../systems/ai/AILodSystem';
 import { AISystem } from '../systems/ai/AISystem';
 import { ApexSystem } from '../systems/ai/ApexSystem';
 import { BreedingSystem } from '../systems/ai/BreedingSystem';
+import { EcologySystem, deerRefuge } from '../systems/ai/Ecology';
 import { ApexAnimation } from '../render/ApexAnimation';
 import { FlowFieldService } from '../systems/ai/nav/FlowFieldService';
 import { NoiseBus } from '../systems/ai/NoiseBus';
 import { PerceptionSystem } from '../systems/ai/PerceptionSystem';
 import { DayNightCycle, DEFAULT_DAY_NIGHT } from '../systems/DayNightCycle';
-import { SIM } from '../data/settings';
 import { EnvironmentSystem } from '../systems/EnvironmentSystem';
 import { InteractionSystem } from '../systems/InteractionSystem';
 import { CraftingSystem } from '../systems/inventory/CraftingSystem';
@@ -138,7 +138,6 @@ export class GameSession {
     const { world, events } = this;
     const terrain = d.bundle.terrain;
     this.cycle = new DayNightCycle({ ...DEFAULT_DAY_NIGHT, seed: d.map.seed });
-    this.applySimSettings();
     // Remove the Three object of any destroyed entity (e.g. emptied carcasses).
     world.onDestroy((e) => world.get(e, RenderObject)?.object.removeFromParent());
 
@@ -255,7 +254,8 @@ export class GameSession {
           const top = this.buildings.foundationTopAt(x, z);
           return top !== null && top - ground < 1.2 ? Math.max(ground, top) : ground;
         },
-        paths: this.paths, cycle: this.cycle, survival: survival.manager, events,
+        paths: this.paths, cycle: this.cycle, survival: survival.manager, events, resources: this.populated.resourceIndex,
+        deerRefuge: deerRefuge(terrain.props.filter((p) => p.kind === 'berry_bush').length),
       }))
       .addSystem(new ApexSystem({
         terrainHeight: (x, z) => sampleHeight(terrain, x, z),
@@ -267,9 +267,30 @@ export class GameSession {
         waterLevel: terrain.cfg.waterLevel, paths: this.paths, isNight: () => this.cycle.isNight,
         survival: survival.manager, events, half: terrain.cfg.size / 2,
       }))
-      .addSystem(new BreedingSystem(events, (x, z) => this.populated.nav.isWalkable(x, z), (x, z) => sampleHeight(terrain, x, z)))
+      .addSystem(new BreedingSystem(events, (x, z) => this.populated.nav.isWalkable(x, z), (x, z) => sampleHeight(terrain, x, z),
+        Math.random, this.populated.resourceIndex))
+      .addSystem(new EcologySystem({
+        events, resources: this.populated.resourceIndex, isWalkable: (x, z) => this.populated.nav.isWalkable(x, z),
+        groundHeight: (x, z) => sampleHeight(terrain, x, z), half: terrain.cfg.size / 2,
+      }))
       .addSystem(this.crafting)
       .addSystem(survival);
+    events.on('creature:arrived', () => {
+      if (!this.disposed) bindEntityVisuals(world, d.renderer.scene, d.assets);
+    });
+    // A dead animal's mesh stays where it fell, on its side, as the carcass.
+    events.on('creature:died', ({ entity, species, cause }) => {
+      const ro = world.get(entity, RenderObject);
+      const t = world.get(entity, Transform);
+      if (!ro || !t) return;
+      const pp = world.require(this.player, Transform).position;
+      if (cause === 'predator' && Math.hypot(t.position.x - pp.x, t.position.z - pp.z) < 40) {
+        events.emit('ui:toast', { text: `Wolves brought down a ${species} nearby` });
+      }
+      ro.object.rotation.z = Math.PI / 2;
+      ro.object.position.y = t.position.y + 0.25;
+      ro.interpolate = false;
+    });
     events.on('creature:born', ({ entity, species }) => {
       if (this.disposed) return;
       bindEntityVisuals(world, d.renderer.scene, d.assets);
@@ -339,17 +360,6 @@ export class GameSession {
   }
 
   // ---- Public API used by App ----------------------------------------------
-
-  /**
-   * Pushes the simulation settings that live in this session's own objects
-   * (the day/night cycle). Everything else reads SIM directly every tick.
-   */
-  applySimSettings(): void {
-    const cfg = this.cycle.cfg;
-    cfg.dayLengthSeconds = SIM.dayLengthMinutes * 60;
-    cfg.meanTempC = SIM.meanTempC;
-    cfg.amplitudeC = SIM.tempSwingC;
-  }
 
   get isInventoryOpen(): boolean {
     return this.inventory.isOpen;

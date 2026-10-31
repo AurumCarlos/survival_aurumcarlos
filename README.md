@@ -17,9 +17,9 @@ Shift sprint · C crouch · Space jump · hold E harvest · I/Tab inventory · 1
 LMB swing · RMB throw spear · B build mode (R/wheel piece, LMB place, X demolish) · E door · Esc or P pause.
 
 **Settings** (main menu or pause menu): graphics (quality, resolution, target FPS, number of detailed trees,
-draw distance, FPS counter) and simulation (day length, temperature, hunger/thirst/tiredness, regeneration,
-movement, harvest yield, regrowth, animals and breeding). Definitions live in `src/data/settings.ts`; values
-are saved in the browser and apply immediately.
+draw distance, FPS counter) and controls & sound (mouse sensitivity, invert Y, field of view, volumes).
+Definitions live in `src/data/settings.ts`; values are saved in the browser and apply immediately.
+Gameplay (survival rates, weather, animals) is not adjustable: it is tuned in the game's data.
 
 **Weather & sound**: rain falls in streaks under grey, cloudy skies (clouds drift on fine days too); the sun,
 the moon (with phases) and stars light the sky. All sound is synthesised in `src/audio/SoundEngine.ts` (no
@@ -407,12 +407,38 @@ cost 300 ms per step; compound bodies cost 0.5 ms.
   - Young wolves are timid and don't bite until they are more than half grown.
   - A message tells you when one is born nearby. Growth is saved.
 
+## 12. Food chain
+
+`src/systems/ai/Ecology.ts` (tuning, helpers, `EcologySystem`) and new behaviours in `AISystem`:
+
+- **Hunger:** deer, boars and wolves have a belly that empties over a day or two. An animal with an
+  empty belly loses health and dies of starvation (it leaves a carcass). The young are fed by their
+  mother. Only well-fed females conceive.
+- **Deer eat berries** (boars eat fiber plants, the "roots"): a hungry animal walks to the nearest ripe
+  bush, eats it bite by bite (one bite = one of the bush's harvests) and the bush regrows like one you
+  picked. Its patrol range drifts toward the food it finds; with nothing in reach it wanders off to
+  look elsewhere, and gives up on bushes it can't reach.
+- **Wolves hunt:** a hungry wolf eats any carcass it can smell (55 m), otherwise picks a deer within
+  45 m, creeps up at a walk and sprints the last 14 m. Deer notice a walking wolf at 11 m, a running
+  one at 22 m, and bolt. A healthy deer outruns a wolf at first but tires after a few seconds, so
+  wolves mostly catch the young, the starving and the cornered; a chase that lasts over 18 s is
+  abandoned. The kill becomes a carcass the pack (and you) can eat. Wolves still attack the player first.
+- **Balance without a cap:** deer are limited by berries and by wolves, wolves by deer.
+  `scripts/simulate-ecology.ts` runs the real systems on real islands for weeks of game time to check
+  it. Two safety nets: wolves leave deer alone when few are left for the island's size (≈ 14 on a
+  medium map; they eat piglets and carcasses instead), and if deer (wolves, boars) still drop below
+  4 (2, 2), a pair arrives from a far corner of the island.
+- **Off-screen animals keep living:** dormant creatures (out of view and far away) now think at a
+  quarter of the rate instead of freezing, so animals eat, hunt and wander everywhere.
+- Unclaimed carcasses rot away after 25 minutes. A toast tells you when wolves bring down an animal nearby.
+- The simulation tab of the settings page is gone: every value above is fixed and tuned.
+
 ## Verification
 
 - `npm test`: 29 survival + 46 refactor + 52 island/building + 14 gameplay + 41 crafting/stations + 43 wildlife/terrain/saves/respawn/breeding + 29 world/physics checks (real cannon-es), all passing. They cover:
   - flow fields: around a wall through a gap, and 40 random trips across the real forest with
     zero entries into blocked cells;
-  - LOD: dormant creatures freeze and wake in place;
+  - LOD: dormant creatures think at a reduced rate and wake in place;
   - the codec is deterministic and cancellation works;
   - save round-trip (stable IDs, Infinity, inventory, AI state), plus corrupt, tampered and
     future-version saves;
