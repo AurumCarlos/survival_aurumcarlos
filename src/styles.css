@@ -20,7 +20,10 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color:
 .hud { position: absolute; inset: 0; pointer-events: none; }
 .crosshair { position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px; border-radius: 50%; background: var(--ink); opacity: 0.8; }
 .clock { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); background: var(--panel); padding: 6px 14px; border-radius: 6px; font-size: 14px; }
-.fps { position: absolute; top: 14px; right: 16px; font-size: 12px; color: var(--ink-dim); }
+.fps { position: absolute; top: 12px; right: 16px; padding: 4px 10px; border-radius: 6px; background: rgba(0, 0, 0, .55);
+  font: 600 15px/1.2 ui-monospace, monospace; color: #7ee07e; min-width: 64px; text-align: right; }
+.fps[data-level=ok] { color: #f0d060; }
+.fps[data-level=bad] { color: #ff6a5a; }
 
 .vitals { position: absolute; left: 16px; bottom: 16px; width: 240px; background: var(--panel); padding: 10px 12px; border-radius: 8px; }
 .bar { display: grid; grid-template-columns: 64px 1fr; align-items: center; gap: 8px; margin: 4px 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
@@ -114,6 +117,9 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color:
 .config input[type=number], .config input[type=text] { flex: 1; font: inherit; color: var(--ink); background: rgba(0,0,0,.3);
   border: 1px solid var(--line); border-radius: 6px; padding: 8px; min-width: 0; }
 .config .row button { padding: 7px 10px; }
+.config .row.check { align-items: flex-start; cursor: pointer; }
+.config .row.check input { margin-top: 3px; accent-color: #8fbf6f; }
+.config .row.check small { display: block; font-size: 12px; color: var(--ink-dim); margin-top: 2px; }
 .config .error { color: var(--bad); min-height: 1em; margin: 4px 0 0; font-size: 13px; }
 .config .actions { display: grid; grid-template-columns: 1fr 2fr; gap: 8px; }
 .bar-outer { height: 8px; border-radius: 4px; background: rgba(255,255,255,.1); overflow: hidden; }

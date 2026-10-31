@@ -11,6 +11,8 @@ export interface MapConfig {
    * flat island they were made on.
    */
   gen?: number;
+  /** Test mode: the survivor starts with the best gear and stacks of every resource. */
+  testMode?: boolean;
 }
 
 export const MAP_LIMITS = { minSize: 128, maxSize: 512, step: 32 } as const;
@@ -30,7 +32,7 @@ export class MapConfigError extends Error {}
  * size so every chunk is complete; non-numeric input is an error rather than
  * a silent default, so the form can show it.
  */
-export function parseMapConfig(raw: { seed?: unknown; size?: unknown; gen?: unknown }): MapConfig {
+export function parseMapConfig(raw: { seed?: unknown; size?: unknown; gen?: unknown; testMode?: unknown }): MapConfig {
   const size = Number(raw.size);
   if (!Number.isFinite(size)) throw new MapConfigError('Map size must be a number.');
   const snapped = Math.round(size / MAP_LIMITS.step) * MAP_LIMITS.step;
@@ -46,7 +48,11 @@ export function parseMapConfig(raw: { seed?: unknown; size?: unknown; gen?: unkn
     seed = hashString(String(raw.seed));
   }
   const gen = Number(raw.gen);
-  return { seed, size: clamped, ...(Number.isInteger(gen) && gen >= 2 && gen <= GENERATOR_VERSION ? { gen } : {}) };
+  return {
+    seed, size: clamped,
+    ...(Number.isInteger(gen) && gen >= 2 && gen <= GENERATOR_VERSION ? { gen } : {}),
+    ...(raw.testMode === true ? { testMode: true } : {}),
+  };
 }
 
 export function toTerrainConfig(m: MapConfig): TerrainConfig {

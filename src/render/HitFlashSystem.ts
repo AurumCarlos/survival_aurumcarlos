@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { createDetailMaterial } from './Materials';
 import type { Entity, System, World } from '../core/ecs/World';
 import type { EventBus } from '../core/EventBus';
 import { RenderObject } from './Renderer';
@@ -14,10 +15,8 @@ const FLASH_SECONDS = 0.35;
 export class HitFlashSystem implements System {
   readonly name = 'hit-flash';
   private readonly active = new Map<Entity, { time: number; originals: Map<THREE.Mesh, THREE.Material | THREE.Material[]> }>();
-  /** Vertex colours × red + red emissive: keeps the low-poly shading but reads clearly as "hurt" day or night. */
-  private readonly red = new THREE.MeshLambertMaterial({
-    vertexColors: true, flatShading: true, color: 0xff5050, emissive: 0x991111,
-  });
+  /** Vertex colours × red + red emissive: reads clearly as "hurt" day or night. */
+  private readonly red = createDetailMaterial({ color: 0xff5050, emissive: 0x991111 });
   private readonly off: () => void;
 
   constructor(events: EventBus, private readonly world: World) {

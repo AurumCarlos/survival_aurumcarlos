@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { System, World } from '../core/ecs/World';
 import { Cullable, Transform } from '../components';
 import type { Chunk } from './WorldBuilder';
+import type { PropBatches } from './PropBatches';
 import { RenderObject } from './Renderer';
 
 /**
@@ -12,8 +13,10 @@ import { RenderObject } from './Renderer';
  * Hiding a whole chunk Group removes its subtree from traversal and from the
  * shadow pass too.
  *
- *  - Chunks: AABB vs frustum. The box is inflated by `shadowMargin` so trees
- *    just behind the camera still cast shadows into view.
+ *  - Terrain chunks: AABB vs frustum and distance (the fog distance: nothing
+ *    past it is visible). The box is inflated by `shadowMargin`.
+ *  - Props: PropBatches.update() does distance culling and tree LOD per
+ *    instance (three frustum-culls each instance).
  *  - Entities with Cullable: bounding sphere vs frustum + max distance.
  *    Also exposes `visible` back to the ECS so far-away creatures can be
  *    simulated at a lower rate by AI (future LOD hook).
@@ -29,10 +32,10 @@ export class CullingSystem implements System {
   constructor(
     private readonly camera: THREE.PerspectiveCamera,
     private readonly chunks: readonly Chunk[],
-    private readonly maxChunkDistance = 170,
+    private readonly props: PropBatches | null,
+    /** Prop distances; `view` (the fog distance: nothing past it shows) also culls terrain chunks. */
+    private readonly distances: () => { view: number; treeLod: number; smallProps: number } = () => ({ view: 170, treeLod: 32, smallProps: 50 }),
     private readonly shadowMargin = 12,
-    /** Trees in chunks closer than this use the detailed mesh; farther ones the low-poly LOD. */
-    private readonly treeLodDistance = 55,
   ) {}
 
   update(world: World): void {
@@ -42,19 +45,15 @@ export class CullingSystem implements System {
     const cam = this.camera.position;
 
     let chunksVisible = 0;
-    const maxD2 = this.maxChunkDistance * this.maxChunkDistance;
+    const dist = this.distances();
+    const maxD = dist.view;
+    this.props?.update(cam.x, cam.z, dist);
+    const maxD2 = maxD * maxD;
     for (const c of this.chunks) {
       this.box.copy(c.bounds).expandByScalar(this.shadowMargin);
       const visible = c.center.distanceToSquared(cam) < maxD2 && this.frustum.intersectsBox(this.box);
       c.group.visible = visible;
-      if (visible) {
-        chunksVisible++;
-        const near = c.bounds.distanceToPoint(cam) < this.treeLodDistance;
-        for (const l of c.lods) {
-          l.high.visible = near;
-          l.low.visible = !near;
-        }
-      }
+      if (visible) chunksVisible++;
     }
 
     let entitiesVisible = 0;

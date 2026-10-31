@@ -5,34 +5,30 @@ import { Creature, HeatSource, ResourceC, ShelterZone, Structure, Transform } fr
 import type { AssetLoader } from '../assets/AssetLoader';
 import { ISLAND, TREE_HEIGHT_STRETCH, type TerrainData, type PropKind } from '../world/TerrainGenerator';
 import type { PopulatedWorld } from '../world/WorldPopulator';
-import { campfireObject, caveMaterial, caveShellGeometry, firLowGeometry, flatMaterial, leanToObject, propGeometry, structureObject } from './LowPolyFactory';
+import { campfireObject, caveMaterial, caveShellGeometry, flatMaterial, leanToObject, propGeometry, structureObject } from './LowPolyFactory';
+import { PropBatches, type PropPlacement } from './PropBatches';
 import { creatureMesh } from './CreatureModels';
 import { RenderObject } from './Renderer';
+import { createTerrainMaterial, createWaterMaterial } from './Materials';
+import { LAYER_MEAN } from './Textures';
 import { treeShape } from '../world/TreeSpecies';
 
-const CASTS_SHADOW: ReadonlySet<PropKind> = new Set<PropKind>(['tree', 'rock', 'berry_bush', 'log', 'metal_rock', 'obsidian_rock', 'crystal', 'oil_rock']);
 /** Kinds whose variant changes the mesh. */
 const VARIANT_MESH: ReadonlySet<PropKind> = new Set<PropKind>(['rock', 'berry_bush', 'metal_rock', 'obsidian_rock', 'crystal', 'rare_flower']);
 
 export interface Chunk {
   group: THREE.Group;
-  /** World-space bounds of terrain + props, used for frustum culling. */
+  /** World-space bounds of the terrain, used for frustum culling. */
   bounds: THREE.Box3;
   center: THREE.Vector3;
-  /** Tree meshes at two levels of detail; CullingSystem shows one or the other by distance. */
-  lods: Array<{ high: THREE.InstancedMesh; low: THREE.InstancedMesh }>;
-}
-
-interface InstanceRef {
-  /** Every mesh that draws this instance (both tree LODs share the index). */
-  meshes: THREE.InstancedMesh[];
-  index: number;
-  matrix: THREE.Matrix4;
 }
 
 export interface BuiltWorld {
   chunks: Chunk[];
-  instances: Map<Entity, InstanceRef>;
+  /** All static props, drawn in two batches. */
+  props: PropBatches;
+  /** Harvestable entity → its prop index in `props`. */
+  instances: Map<Entity, number>;
   water: THREE.Mesh;
 }
 
@@ -52,9 +48,9 @@ export interface BuildOptions {
  * whenever it has used `frameBudgetMs`, so even a 512 m map (256 chunks)
  * keeps the loading screen animating at 60 FPS instead of freezing.
  *
- * Draw-call strategy: each 32 m chunk owns one terrain mesh plus one
- * InstancedMesh per prop kind/variant, which is what makes frustum culling
- * effective (Three culls an InstancedMesh as a single bounding sphere).
+ * Draw-call strategy: each 32 m chunk owns one terrain mesh (culled per
+ * chunk); every prop of the map goes into two BatchedMeshes (see
+ * PropBatches), culled per instance.
  */
 export async function buildWorldVisuals(
   scene: THREE.Scene, terrain: TerrainData, populated: PopulatedWorld, opts: BuildOptions = {},
@@ -63,7 +59,8 @@ export async function buildWorldVisuals(
   const { cfg, chunksPerSide } = terrain;
   const total = chunksPerSide * chunksPerSide;
   const chunks: Chunk[] = [];
-  const instances = new Map<Entity, InstanceRef>();
+  const instances = new Map<Entity, number>();
+  const placements: PropPlacement[] = [];
 
   // Group prop indices by chunk once (cheap, ~O(props)).
   const byChunk: number[][] = Array.from({ length: total }, () => []);
@@ -78,56 +75,24 @@ export async function buildWorldVisuals(
     const cx = ci % chunksPerSide, cz = Math.floor(ci / chunksPerSide);
     const group = new THREE.Group();
     group.name = `chunk-${ci}`;
-    const chunk: Chunk = { group, bounds: new THREE.Box3(), center: new THREE.Vector3(), lods: [] };
+    const chunk: Chunk = { group, bounds: new THREE.Box3(), center: new THREE.Vector3() };
     chunks.push(chunk);
 
     const ground = terrainChunkMesh(terrain, cx * cellsPerChunk, cz * cellsPerChunk, cellsPerChunk);
     group.add(ground);
     chunk.bounds.expandByObject(ground);
 
-    // Bucket this chunk's props by kind+variant → one InstancedMesh each.
-    const buckets = new Map<string, number[]>();
     for (const i of byChunk[ci]!) {
       const p = terrain.props[i]!;
       if (p.kind === 'water_source') continue; // the pond itself is the visual
-      const key = `${p.kind}|${p.kind === 'tree' ? treeShape(p.variant) : VARIANT_MESH.has(p.kind) ? p.variant % 4 : 0}`;
-      let b = buckets.get(key);
-      if (!b) buckets.set(key, (b = []));
-      b.push(i);
-    }
-    for (const [key, list] of buckets) {
-      const [kind, variant] = key.split('|') as [PropKind, string];
-      const mesh = new THREE.InstancedMesh(propGeometry(kind, Number(variant)), flatMaterial, list.length);
-      mesh.castShadow = CASTS_SHADOW.has(kind);
-      mesh.receiveShadow = true;
-      const low = kind === 'tree' ? new THREE.InstancedMesh(firLowGeometry(Number(variant)), flatMaterial, list.length) : null;
-      if (low) {
-        low.castShadow = true;
-        low.receiveShadow = true;
-        low.visible = false;
-        chunk.lods.push({ high: mesh, low });
-      }
-      list.forEach((propIndex, n) => {
-        const p = terrain.props[propIndex]!;
-        pos.set(p.position.x, p.position.y - 0.08, p.position.z); // sink slightly so props don't float on slopes
-        q.setFromAxisAngle(up, p.rotationY);
-        s.setScalar(p.scale);
-        if (p.kind === 'tree') s.y *= TREE_HEIGHT_STRETCH; // taller, not thicker
-        m.compose(pos, q, s);
-        mesh.setMatrixAt(n, m);
-        low?.setMatrixAt(n, m);
-        const e = populated.stableToEntity.get(propIndex);
-        if (e !== undefined) instances.set(e, { meshes: low ? [mesh, low] : [mesh], index: n, matrix: m.clone() });
-      });
-      mesh.computeBoundingBox();
-      mesh.computeBoundingSphere();
-      group.add(mesh);
-      if (low) {
-        low.computeBoundingBox();
-        low.computeBoundingSphere();
-        group.add(low);
-      }
-      chunk.bounds.union(mesh.boundingBox!);
+      pos.set(p.position.x, p.position.y - 0.08, p.position.z); // sink slightly so props don't float on slopes
+      q.setFromAxisAngle(up, p.rotationY);
+      s.setScalar(p.scale);
+      if (p.kind === 'tree') s.y *= TREE_HEIGHT_STRETCH; // taller, not thicker
+      const variant = p.kind === 'tree' ? treeShape(p.variant) : VARIANT_MESH.has(p.kind) ? p.variant % 4 : 0;
+      const e = populated.stableToEntity.get(i);
+      if (e !== undefined) instances.set(e, placements.length);
+      placements.push({ kind: p.kind, variant, matrix: m.compose(pos, q, s).clone(), x: p.position.x, z: p.position.z });
     }
     chunk.bounds.getCenter(chunk.center);
     scene.add(group);
@@ -139,6 +104,9 @@ export async function buildWorldVisuals(
       sliceStart = performance.now();
     }
   }
+
+  const props = new PropBatches(placements);
+  scene.add(props.solid, props.leaves);
 
   // Caves: rock domes over the chambers carved into the mountains.
   for (const c of terrain.caves ?? []) {
@@ -152,9 +120,9 @@ export async function buildWorldVisuals(
     scene.add(cave);
   }
 
-  // Clear turquoise water: the sand under the lagoon shows through and the
-  // deepening sea floor (see terrainColor) gives the shallow-to-deep gradient.
-  const waterMat = new THREE.MeshLambertMaterial({ color: 0x2bb3c4, transparent: true, opacity: 0.55, depthWrite: false });
+  // Clear water reflecting the sky: the sand under the lagoon shows through and
+  // the deepening sea floor (see terrainLayers) gives the shallow-to-deep gradient.
+  const waterMat = createWaterMaterial();
   waterMat.userData['owned'] = true;
   // The sea extends far past the map so the island sits in an ocean that
   // reaches the (fogged) horizon in every direction.
@@ -168,7 +136,7 @@ export async function buildWorldVisuals(
   // Deep sea floor out to the horizon, just under the terrain's own sea bed
   // (which covers it inside the map). Without it, the transparent water past
   // the map edge shows the sky through it — a visible light square.
-  const floorMat = new THREE.MeshLambertMaterial({ color: DEEP.clone().multiplyScalar(0.97) });
+  const floorMat = new THREE.MeshStandardMaterial({ color: DEEP.clone().multiplyScalar(0.97), roughness: 1 });
   floorMat.userData['owned'] = true;
   const floorGeo = new THREE.PlaneGeometry(cfg.size * 8, cfg.size * 8).rotateX(-Math.PI / 2);
   floorGeo.userData['owned'] = true;
@@ -176,7 +144,7 @@ export async function buildWorldVisuals(
   seaFloor.position.y = cfg.waterLevel - ISLAND.seaDepth - 0.05;
   scene.add(seaFloor);
   opts.onProgress?.(1);
-  return { chunks, instances, water };
+  return { chunks, props, instances, water };
 }
 
 /**
@@ -217,7 +185,14 @@ export function bindEntityVisuals(world: World, scene: THREE.Scene, assets: Asse
   }
 }
 
-/** Faceted terrain: non-indexed triangles, one colour per face. */
+/** Shared by every terrain chunk; textures are baked on first use. */
+let terrainMaterial: THREE.MeshLambertMaterial | null = null;
+
+/**
+ * Smooth textured terrain: an indexed grid per chunk. Normals come from the
+ * global height field (central differences), so chunk borders don't show
+ * seams. Each vertex carries five texture-layer weights and a colour tint.
+ */
 function terrainChunkMesh(t: TerrainData, ix0: number, iz0: number, cells: number): THREE.Mesh {
   const { cfg } = t;
   const n = cfg.resolution + 1;
@@ -225,97 +200,127 @@ function terrainChunkMesh(t: TerrainData, ix0: number, iz0: number, cells: numbe
   const half = cfg.size / 2;
   const ix1 = Math.min(ix0 + cells, cfg.resolution);
   const iz1 = Math.min(iz0 + cells, cfg.resolution);
-  const quads = Math.max(0, ix1 - ix0) * Math.max(0, iz1 - iz0);
-  const positions = new Float32Array(quads * 6 * 3);
-  const colors = new Float32Array(quads * 6 * 3);
-  const c = new THREE.Color();
-  let o = 0;
+  const w = ix1 - ix0 + 1, d = iz1 - iz0 + 1;
+  const count = w * d;
+  const positions = new Float32Array(count * 3);
+  const normals = new Float32Array(count * 3);
+  const colors = new Float32Array(count * 3);
+  const layersA = new Float32Array(count * 4);
+  const layersB = new Float32Array(count);
+  const h = (ix: number, iz: number): number => t.heights[Math.min(n - 1, Math.max(0, iz)) * n + Math.min(n - 1, Math.max(0, ix))]!;
+  const L = new Float32Array(5);
+  const tint = new THREE.Color();
+  const nv = new THREE.Vector3();
 
-  const h = (ix: number, iz: number): number => t.heights[iz * n + ix]!;
-  const pushTri = (ax: number, az: number, bx: number, bz: number, cx: number, cz: number): void => {
-    const avgH = (h(ax, az) + h(bx, bz) + h(cx, cz)) / 3;
-    const slope = (t.slopes[az * n + ax]! + t.slopes[bz * n + bx]! + t.slopes[cz * n + cx]!) / 3;
-    const biome = t.biomes ? Math.max(t.biomes[az * n + ax]!, t.biomes[bz * n + bx]!, t.biomes[cz * n + cx]!) : -1;
-    terrainColor(c, avgH, slope, cfg.waterLevel, cfg.maxHeight, ax * 31 + az * 17, biome);
-    for (const [ix, iz] of [[ax, az], [bx, bz], [cx, cz]] as const) {
-      positions[o] = ix * step - half;
-      positions[o + 1] = h(ix, iz);
-      positions[o + 2] = iz * step - half;
-      colors[o] = c.r;
-      colors[o + 1] = c.g;
-      colors[o + 2] = c.b;
-      o += 3;
+  for (let iz = iz0, v = 0; iz <= iz1; iz++) {
+    for (let ix = ix0; ix <= ix1; ix++, v++) {
+      const y = h(ix, iz);
+      positions[v * 3] = ix * step - half;
+      positions[v * 3 + 1] = y;
+      positions[v * 3 + 2] = iz * step - half;
+      nv.set(h(ix - 1, iz) - h(ix + 1, iz), 2 * step, h(ix, iz - 1) - h(ix, iz + 1)).normalize();
+      normals[v * 3] = nv.x;
+      normals[v * 3 + 1] = nv.y;
+      normals[v * 3 + 2] = nv.z;
+      const biome = t.biomes ? t.biomes[iz * n + ix]! : -1;
+      terrainLayers(L, tint, y, t.slopes[iz * n + ix]!, cfg.waterLevel, ix * 31 + iz * 17, biome);
+      layersA.set([L[0]!, L[1]!, L[2]!, L[3]!], v * 4);
+      layersB[v] = L[4]!;
+      colors[v * 3] = tint.r;
+      colors[v * 3 + 1] = tint.g;
+      colors[v * 3 + 2] = tint.b;
     }
-  };
-
-  for (let iz = iz0; iz < iz1; iz++) {
-    for (let ix = ix0; ix < ix1; ix++) {
-      // Alternate the diagonal for a less regular, more "hand-made" look.
-      if ((ix + iz) % 2 === 0) {
-        pushTri(ix, iz, ix, iz + 1, ix + 1, iz);
-        pushTri(ix + 1, iz, ix, iz + 1, ix + 1, iz + 1);
-      } else {
-        pushTri(ix, iz, ix, iz + 1, ix + 1, iz + 1);
-        pushTri(ix, iz, ix + 1, iz + 1, ix + 1, iz);
-      }
+  }
+  const index: number[] = [];
+  for (let z = 0; z < d - 1; z++) {
+    for (let x = 0; x < w - 1; x++) {
+      const a = z * w + x, b = a + 1, c = a + w, e = c + 1;
+      index.push(a, c, b, b, c, e);
     }
   }
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
   geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  geo.computeVertexNormals(); // non-indexed → per-face normals → flat shading
+  geo.setAttribute('layersA', new THREE.BufferAttribute(layersA, 4));
+  geo.setAttribute('layersB', new THREE.BufferAttribute(layersB, 1));
+  geo.setIndex(index);
   geo.userData['owned'] = true; // freed by Renderer.resetScene()
   geo.computeBoundingBox();
   geo.computeBoundingSphere();
-  const mesh = new THREE.Mesh(geo, flatMaterial);
+  const mesh = new THREE.Mesh(geo, (terrainMaterial ??= createTerrainMaterial()));
   mesh.receiveShadow = true;
   mesh.matrixAutoUpdate = false; // static: skip per-frame matrix recompute
   mesh.updateMatrix();
   return mesh;
 }
 
-const SAND = new THREE.Color(0xf0e4bf);
-const WET_SAND = new THREE.Color(0xdccb9c);
 const DEEP = new THREE.Color(0x14606e);
-const FOREST = new THREE.Color(0x4f7d35);
-const NEEDLES = new THREE.Color(0x6b6a3a);
+const WHITE = new THREE.Color(1, 1, 1);
+/** Tint that turns the sand texture into the deep sea floor colour. */
+const DEEP_TINT = new THREE.Color(DEEP.r / LAYER_MEAN.sand.r, DEEP.g / LAYER_MEAN.sand.g, DEEP.b / LAYER_MEAN.sand.b);
 
-const JUNGLE = new THREE.Color(0x2f6a2a);
-const JUNGLE_LITTER = new THREE.Color(0x4a5a26);
-const MEADOW = new THREE.Color(0x8db24a);
-const MEADOW_DRY = new THREE.Color(0xb5b45a);
-const HIGHLAND = new THREE.Color(0x7c8a4e);
-const SCREE = new THREE.Color(0x8a8378);
-const SNOW = new THREE.Color(0xeef3f6);
-const CAVE_FLOOR = new THREE.Color(0x4d4842);
-const CLIFF = new THREE.Color(0x7d7a72);
+/** Biome tints, relative to each texture layer's own colour (1 = untouched). */
+const TINT = {
+  wetSand: new THREE.Color(0.78, 0.76, 0.72),
+  forest: new THREE.Color(0.92, 1.0, 0.86),
+  jungle: new THREE.Color(0.78, 1.0, 0.74),
+  meadow: new THREE.Color(1.12, 1.1, 0.92),
+  dry: new THREE.Color(1.25, 1.12, 0.8),
+  highland: new THREE.Color(1.0, 0.98, 0.9),
+  cave: new THREE.Color(0.7, 0.68, 0.66),
+};
 
-function terrainColor(out: THREE.Color, h: number, slope: number, water: number, _maxH: number, seed: number, biome = -1): void {
-  const v = 0.94 + Math.abs((Math.sin(seed * 12.9898) * 43758.5453) % 1) * 0.06;
+const sstep = (a: number, b: number, v: number): number => {
+  const x = Math.min(1, Math.max(0, (v - a) / (b - a)));
+  return x * x * (3 - 2 * x);
+};
+
+/**
+ * Texture-layer weights (sand, grass, dirt, rock, snow) and tint for one
+ * terrain vertex, from height above the sea, slope and biome. Blends are
+ * smooth so neighbouring vertices fade into each other.
+ */
+function terrainLayers(L: Float32Array, tint: THREE.Color, h: number, slope: number, water: number, seed: number, biome = -1): void {
+  L.fill(0);
+  tint.copy(WHITE);
   const r2 = Math.abs((Math.sin(seed * 7.13) * 9871.3) % 1);
-  if (h < water) out.copy(WET_SAND).lerp(DEEP, Math.min(1, (water - h) / 4)); // sea floor darkens with depth
-  else if (h < water + 0.32) out.copy(WET_SAND); // wet sand at the waterline
-  else if (h < water + 0.72 && biome !== 6) out.copy(SAND); // the beach
-  else if (biome === 6) out.copy(CAVE_FLOOR).multiplyScalar(0.9 + r2 * 0.2);
-  else if (biome === 5) out.copy(slope > 0.35 ? CLIFF : SNOW).lerp(SCREE, slope > 0.35 ? r2 * 0.3 : r2 * 0.08); // snowy peaks, bare rock on cliffs
-  else if (slope > 0.3) out.copy(CLIFF).lerp(SCREE, r2 * 0.5); // rock faces
-  else if (biome === 4) out.copy(HIGHLAND).lerp(SCREE, 0.25 + r2 * 0.45); // stony upland grass
-  else if (biome === 3) out.copy(MEADOW).lerp(MEADOW_DRY, r2 * 0.6);
-  else if (biome === 2) out.copy(JUNGLE).lerp(JUNGLE_LITTER, r2 * 0.4);
-  else out.copy(FOREST).lerp(NEEDLES, r2 * 0.35); // needle-strewn forest floor
-  out.multiplyScalar(v);
+  const above = h - water;
+  // Sand everywhere near and under the sea; it fades into the biome above.
+  const beach = biome === 6 ? 0 : 1 - sstep(0.55, 0.95, above);
+  const rock = Math.max(sstep(0.22, 0.38, slope), biome === 4 ? 0.2 + r2 * 0.25 : 0);
+  let snow = 0, grass = 0, dirt = 0;
+  switch (biome) {
+    case 6: dirt = 1; tint.copy(TINT.cave); break;
+    case 5: snow = 1; break;
+    case 4: grass = 0.75; dirt = 0.25; tint.copy(TINT.highland); break;
+    case 3: grass = 1; tint.copy(TINT.meadow).lerp(TINT.dry, r2 * 0.5); break;
+    case 2: grass = 0.55; dirt = 0.45; tint.copy(TINT.jungle); break;
+    default: grass = 0.45; dirt = 0.55; tint.copy(TINT.forest); break;
+  }
+  const land = 1 - beach;
+  const soft = land * (1 - rock);
+  L[0] = beach;
+  L[1] = grass * soft;
+  L[2] = dirt * soft;
+  L[3] = rock * land;
+  L[4] = snow * soft;
+  if (biome === 5 && rock > 0) L[4] += rock * land * 0.25; // snow lingers on ledges
+  if (above < 0.32) tint.lerp(TINT.wetSand, sstep(0.32, -0.1, above)); // wet sand at the waterline
+  if (above < 0) tint.lerp(DEEP_TINT, Math.min(1, -above / 4) * 0.85); // sea floor darkens with depth
+  const v = 0.94 + Math.abs((Math.sin(seed * 12.9898) * 43758.5453) % 1) * 0.08;
+  tint.multiplyScalar(v);
 }
 
 /**
- * Keeps harvestable instances in sync with Resource state: shrinks a tree's
- * instance to zero scale when depleted and restores it when it regrows. On
+ * Keeps harvestable props in sync with Resource state: hides a felled tree
+ * or mined rock when depleted and shows it again when it regrows. On
  * the first frame it also hides anything a loaded save marks as depleted.
  */
 export class ResourceVisualSystem implements System {
   readonly name = 'resource-visuals';
   private readonly hidden = new Set<Entity>();
-  private readonly zero = new THREE.Matrix4().makeScale(0, 0, 0);
   private initialSyncDone = false;
 
   constructor(private readonly built: BuiltWorld, events: EventBus) {
@@ -341,12 +346,9 @@ export class ResourceVisualSystem implements System {
   }
 
   private setVisible(e: Entity, visible: boolean): void {
-    const ref = this.built.instances.get(e);
-    if (!ref) return;
-    for (const mesh of ref.meshes) {
-      mesh.setMatrixAt(ref.index, visible ? ref.matrix : this.zero);
-      mesh.instanceMatrix.needsUpdate = true;
-    }
+    const prop = this.built.instances.get(e);
+    if (prop === undefined) return;
+    this.built.props.setDepleted(prop, !visible);
     if (visible) this.hidden.delete(e);
     else this.hidden.add(e);
   }

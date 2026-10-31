@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import type { System, World } from '../core/ecs/World';
 import { PlayerControlled } from '../components';
 import { PlayerAnimC, viewModelPose, type ViewPose } from '../systems/player/PlayerAnimation';
-import { flatMaterial, viewModelGeometry } from './LowPolyFactory';
+import { viewModelGeometry } from './LowPolyFactory';
+import { createDetailMaterial } from './Materials';
 import type { Renderer } from './Renderer';
 
 /**
@@ -40,7 +41,8 @@ export class ViewModel implements System {
   private readonly tmp = new THREE.Vector3();
 
   constructor(private readonly r: Renderer) {
-    this.mesh = new THREE.Mesh(viewModelGeometry(null), flatMaterial);
+    // Finer, softer grain than the world's: the tool is ~0.5 m from the eye.
+    this.mesh = new THREE.Mesh(viewModelGeometry(null), createDetailMaterial({ grainScale: 0.25, grainStrength: 0.35 }));
     this.mesh.visible = false;
     this.mesh.frustumCulled = false;
     this.mesh.scale.setScalar(0.62); // hand-space models are ~life-size; scaled to read well at 58° FOV

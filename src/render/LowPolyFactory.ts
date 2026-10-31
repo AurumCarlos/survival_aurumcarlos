@@ -1,34 +1,39 @@
 import * as THREE from 'three';
 import { SPECIES, TREE_SPECIES, treeShape, treeSpecies } from '../world/TreeSpecies';
 import { BED, STAIRS } from '../systems/building/BuildingGrid';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+import { createDetailMaterial } from './Materials';
+import { CardBuilder, LeafRegion, crownCards, frondCards, tuftCards, whorlCards } from './Foliage';
 import type { PropKind } from '../world/TerrainGenerator';
 
 /**
- * Procedural low-poly meshes. These are both the default art (the game runs
- * with zero downloaded assets) and the fallback the AssetLoader substitutes
- * when a GLTF fails to load.
+ * Procedural meshes. These are both the default art (the game runs with zero
+ * downloaded assets) and the fallback the AssetLoader substitutes when a GLTF
+ * fails to load.
  *
- * Every geometry carries per-vertex colour and is drawn with ONE shared
- * flat-shaded material, which keeps draw calls and shader variants minimal.
+ * Every geometry carries per-vertex colour and is drawn with ONE shared PBR
+ * material whose triplanar grain texture supplies the surface detail, which
+ * keeps draw calls and shader variants minimal. Vertices that share a
+ * position, normal and colour are welded in merge(), so curved shapes shade
+ * smoothly while box edges and detail-0 crystals stay crisp.
  */
 
-export const flatMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
+export const flatMaterial = createDetailMaterial();
 
 export function paint(geo: THREE.BufferGeometry, hex: number, jitter = 0.06, seed = 1): THREE.BufferGeometry {
   const g = geo.index ? geo.toNonIndexed() : geo;
   const c = new THREE.Color(hex);
-  const n = g.attributes['position']!.count;
+  const p = g.attributes['position']!;
+  const n = p.count;
   const colors = new Float32Array(n * 3);
-  // One colour per triangle with slight variation reads as "hand-painted facets".
-  for (let tri = 0; tri < n / 3; tri++) {
-    const v = 1 + (pseudo(tri * 7 + seed) - 0.5) * 2 * jitter;
-    for (let k = 0; k < 3; k++) {
-      const i = (tri * 3 + k) * 3;
-      colors[i] = Math.min(1, c.r * v);
-      colors[i + 1] = Math.min(1, c.g * v);
-      colors[i + 2] = Math.min(1, c.b * v);
-    }
+  // Colour varies by position (not per triangle), so shared corners keep one
+  // colour and can be welded for smooth shading.
+  for (let i = 0; i < n; i++) {
+    const h = pseudo(Math.round(p.getX(i) * 40) * 3 + Math.round(p.getY(i) * 40) * 5 + Math.round(p.getZ(i) * 40) * 7 + seed);
+    const v = 1 + (h - 0.5) * 2 * jitter;
+    colors[i * 3] = Math.min(1, c.r * v);
+    colors[i * 3 + 1] = Math.min(1, c.g * v);
+    colors[i * 3 + 2] = Math.min(1, c.b * v);
   }
   g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
   g.deleteAttribute('uv');
@@ -36,8 +41,10 @@ export function paint(geo: THREE.BufferGeometry, hex: number, jitter = 0.06, see
 }
 
 export function merge(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
-  const g = mergeGeometries(parts, false);
-  if (!g) throw new Error('mergeGeometries failed: attribute mismatch');
+  const merged = mergeGeometries(parts.map((p) => (p.index ? p.toNonIndexed() : p)), false);
+  if (!merged) throw new Error('mergeGeometries failed: attribute mismatch');
+  // Weld on position + source normal + colour: smooth surfaces fuse, hard edges stay split.
+  const g = mergeVertices(merged, 1e-3);
   g.computeVertexNormals();
   g.computeBoundingSphere();
   return g;
@@ -60,6 +67,55 @@ export function wobble(geo: THREE.BufferGeometry, amount: number, seed: number):
   return geo;
 }
 
+/** Smooth 3D value noise (by position) for natural rock surfaces. */
+function noise3(x: number, y: number, z: number, seed: number): number {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  const fx = x - xi, fy = y - yi, fz = z - zi;
+  const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy), sz = fz * fz * (3 - 2 * fz);
+  const h = (i: number, j: number, k: number): number => pseudo((xi + i) * 157 + (yi + j) * 113 + (zi + k) * 71 + seed * 13);
+  const l = (a: number, b: number, t: number): number => a + (b - a) * t;
+  return l(
+    l(l(h(0, 0, 0), h(1, 0, 0), sx), l(h(0, 1, 0), h(1, 1, 0), sx), sy),
+    l(l(h(0, 0, 1), h(1, 0, 1), sx), l(h(0, 1, 1), h(1, 1, 1), sx), sy),
+    sz,
+  );
+}
+
+/**
+ * A weathered boulder: a dense sphere pushed in and out by layered noise,
+ * with flattened facets (fracture planes) and a flat base sitting on the ground.
+ */
+export function boulderGeometry(radius: number, seed: number, squash = 0.65, rough = 1): THREE.BufferGeometry {
+  const g = new THREE.IcosahedronGeometry(radius, 3);
+  const p = g.attributes['position']!;
+  const v = new THREE.Vector3();
+  // A few random fracture planes the surface gets clipped to.
+  const planes = Array.from({ length: 5 }, (_, k) => {
+    const a = pseudo(seed * 3 + k) * Math.PI * 2, e = (pseudo(seed * 5 + k) - 0.3) * 1.2;
+    return { n: new THREE.Vector3(Math.cos(a) * Math.cos(e), Math.sin(e), Math.sin(a) * Math.cos(e)), d: radius * (0.72 + pseudo(seed * 7 + k) * 0.2) };
+  });
+  for (let i = 0; i < p.count; i++) {
+    v.set(p.getX(i), p.getY(i), p.getZ(i));
+    const u = v.clone().normalize();
+    let k = 1;
+    let f = 1.6 / radius, amp = 0.22 * rough;
+    for (let o = 0; o < 4; o++) {
+      k += (noise3(u.x * f * radius, u.y * f * radius, u.z * f * radius, seed + o * 17) - 0.5) * amp;
+      f *= 2.1;
+      amp *= 0.48;
+    }
+    v.multiplyScalar(k);
+    for (const pl of planes) {
+      const d = v.dot(pl.n);
+      if (d > pl.d) v.addScaledVector(pl.n, (pl.d - d) * 0.85);
+    }
+    v.y *= squash;
+    if (v.y < -radius * 0.12) v.y = -radius * 0.12 + (v.y + radius * 0.12) * 0.15; // flat-ish base, buried a little
+    p.setXYZ(i, v.x, v.y, v.z);
+  }
+  return g;
+}
+
 const cache = new Map<string, THREE.BufferGeometry>();
 export function cached(key: string, build: () => THREE.BufferGeometry): THREE.BufferGeometry {
   let g = cache.get(key);
@@ -76,20 +132,22 @@ export function propGeometry(kind: PropKind, variant: number): THREE.BufferGeome
       case 'tree':
         return treeGeometry(variant, false);
       case 'rock':
-        return merge([paint(wobble(new THREE.IcosahedronGeometry(0.9, 1), 0.35, variant).scale(1, 0.62, 1), 0x8a8a85, 0.12, variant)]);
+        return merge([paint(boulderGeometry(0.95, variant + 1, 0.62), 0x8a857c, 0.1, variant)]);
       case 'berry_bush': {
         // Berry colours by variant (which berries grow on it, see BUSH_BERRIES).
         const pairs = [[0xb3263a, 0xd8434f], [0xe6c229, 0x2c58c9], [0xb3263a, 0x2a1d3a], [0xd8434f, 0xe9e2c8]] as const;
         const [c1, c2] = pairs[variant % pairs.length]!;
-        const parts = [paint(wobble(new THREE.IcosahedronGeometry(0.7, 1), 0.25, variant).translate(0, 0.55, 0), 0x3d7a35)];
-        for (let k = 0; k < 7; k++) {
-          const a = k * 2.3, r = 0.45 + pseudo(k) * 0.2;
-          parts.push(paint(new THREE.IcosahedronGeometry(0.09, 0).translate(Math.cos(a) * r, 0.45 + (k % 3) * 0.2, Math.sin(a) * r), k % 2 ? c1 : c2, 0));
+        const parts = [core(0.45, 0, 0.55, 0, 0x3d7a35, variant)];
+        for (let k = 0; k < 9; k++) {
+          const a = k * 2.3, r = 0.5 + pseudo(k) * 0.2;
+          parts.push(paint(new THREE.IcosahedronGeometry(0.07, 0).translate(Math.cos(a) * r, 0.4 + (k % 3) * 0.2, Math.sin(a) * r), k % 2 ? c1 : c2, 0));
         }
-        return merge(parts);
+        const leaves = new CardBuilder();
+        crownCards(leaves, V(0, 0.6, 0), V(0.8, 0.6, 0.8), 22, 0.7, LeafRegion.Broadleaf, [0x3d7a35, 0x356b2e, 0x4a8a3c], variant + 3);
+        return withLeaves(parts, leaves);
       }
       case 'metal_rock': {
-        const parts = [paint(wobble(new THREE.IcosahedronGeometry(0.9, 1), 0.3, variant + 3).scale(1, 0.75, 1), 0x6d6a66, 0.12, variant)];
+        const parts = [paint(boulderGeometry(0.92, variant + 31, 0.75), 0x6d6a66, 0.1, variant)];
         for (let k = 0; k < 6; k++) { // shiny ore veins
           const a = k * 1.9, h = 0.15 + (k % 3) * 0.22;
           parts.push(paint(new THREE.OctahedronGeometry(0.16, 0).scale(1.6, 0.6, 1).rotateY(a).translate(Math.cos(a) * 0.75, h, Math.sin(a) * 0.75), 0xc9b98a, 0.1, k));
@@ -98,7 +156,7 @@ export function propGeometry(kind: PropKind, variant: number): THREE.BufferGeome
       }
       case 'obsidian_rock':
         return merge([
-          paint(wobble(new THREE.OctahedronGeometry(0.9, 1), 0.35, variant + 5).scale(1, 0.9, 1).translate(0, 0.25, 0), 0x1d1b24, 0.18, variant),
+          paint(boulderGeometry(0.95, variant + 51, 0.9, 1.4).translate(0, 0.2, 0), 0x1d1b24, 0.12, variant),
           paint(new THREE.IcosahedronGeometry(0.18, 0).translate(0.5, 0.55, 0.3), 0xd9c63a, 0.1), // sulfur crust
           paint(new THREE.IcosahedronGeometry(0.14, 0).translate(-0.4, 0.4, -0.45), 0xd9c63a, 0.1),
         ]);
@@ -112,7 +170,7 @@ export function propGeometry(kind: PropKind, variant: number): THREE.BufferGeome
       }
       case 'oil_rock':
         return merge([
-          paint(wobble(new THREE.IcosahedronGeometry(0.85, 1), 0.3, variant + 9).scale(1, 0.6, 1), 0x2a2622, 0.15, variant),
+          paint(boulderGeometry(0.88, variant + 91, 0.6), 0x2a2622, 0.12, variant),
           paint(new THREE.CircleGeometry(1.1, 7).rotateX(-Math.PI / 2).translate(0, 0.03, 0), 0x14110f, 0.05), // tar pool
         ]);
       case 'shell_bed': {
@@ -150,18 +208,17 @@ export function propGeometry(kind: PropKind, variant: number): THREE.BufferGeome
         return merge(parts);
       }
       case 'fiber_plant': {
-        const blades: THREE.BufferGeometry[] = [];
-        for (let i = 0; i < 5; i++) {
-          blades.push(
-            paint(new THREE.ConeGeometry(0.06, 0.9, 3).rotateZ((i - 2) * 0.25).rotateY(i * 1.3).translate(0, 0.45, 0), 0x8fae4a, 0.1, i),
-          );
-        }
-        return merge(blades);
+        const b = new CardBuilder();
+        tuftCards(b, 1.1, 1.0, 4, 0x77924a, variant);
+        return b.build();
       }
-      case 'grass_tuft':
-        return merge([0, 1, 2].map((i) => paint(new THREE.ConeGeometry(0.05, 0.4, 3).rotateZ((i - 1) * 0.35).translate(0, 0.2, 0), 0x5f9a40, 0.15, i)));
+      case 'grass_tuft': {
+        const b = new CardBuilder();
+        tuftCards(b, 0.7, 0.45, 3, 0x557a33, variant);
+        return b.build();
+      }
       case 'log':
-        return merge([paint(new THREE.CylinderGeometry(0.25, 0.25, 2.4, 6).rotateZ(Math.PI / 2).translate(0, 0.25, 0), 0x5a3d25)]);
+        return merge([paint(new THREE.CylinderGeometry(0.24, 0.27, 2.4, 14).rotateZ(Math.PI / 2).translate(0, 0.25, 0), 0x5a3d25)]);
       case 'mushroom':
         return merge([
           paint(new THREE.CylinderGeometry(0.05, 0.06, 0.25, 5).translate(0, 0.12, 0), 0xe8e0cc),
@@ -198,50 +255,67 @@ const FIR_VARIANTS = [
   { crownBase: 3.4, crownR: 2.2, tiers: 13, dark: 0x1c432a, light: 0x2a5c36 },
 ] as const;
 
+/**
+ * Bark/core parts (detail material, group 0) + leaf cards (foliage material,
+ * group 1) in one geometry, so a tree stays one InstancedMesh per chunk.
+ */
+function withLeaves(solid: THREE.BufferGeometry[], leaves: CardBuilder): THREE.BufferGeometry {
+  const bark = merge(solid);
+  bark.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(bark.attributes['position']!.count * 2), 2));
+  const g = mergeGeometries([bark, leaves.build()], true);
+  if (!g) throw new Error('mergeGeometries failed: tree attribute mismatch');
+  g.computeBoundingSphere();
+  return g;
+}
+
 function conifer(v: ConiferSpec, seed: number, low: boolean): THREE.BufferGeometry {
   const { H } = v;
-  const segs = low ? 6 : 8;
-  const tiers = low ? Math.max(4, Math.round(v.tiers / 3)) : v.tiers;
+  const tiers = low ? Math.max(4, Math.round(v.tiers / 2.5)) : v.tiers;
   const parts: THREE.BufferGeometry[] = [
-    paint(new THREE.CylinderGeometry(0.05, v.trunk, H * 0.92, low ? 5 : 8).translate(0, H * 0.46, 0), v.bark, 0.06, seed),
+    paint(new THREE.CylinderGeometry(0.05, v.trunk, H * 0.92, low ? 6 : 10).translate(0, H * 0.46, 0), v.bark, 0.06, seed),
   ];
-  if (!low) parts.push(paint(new THREE.CylinderGeometry(v.trunk, v.trunk * 1.55, 0.45, 8).translate(0, 0.22, 0), v.bark, 0.06)); // root flare
-  const top = H - 1.6;
-  const coneH = ((H - v.crownBase) / tiers) * 2.1; // each whorl overlaps the next two
+  if (!low) parts.push(paint(new THREE.CylinderGeometry(v.trunk, v.trunk * 1.55, 0.45, 10).translate(0, 0.22, 0), v.bark, 0.06)); // root flare
+  // Dark inner body: the crown never looks see-through, the sprays give its outline.
+  const crownH = H - v.crownBase;
+  parts.push(paint(new THREE.ConeGeometry(v.crownR * 0.32, crownH, 8).translate(0, v.crownBase + crownH / 2, 0), new THREE.Color(v.dark).multiplyScalar(0.75).getHex(), 0.05));
+  const leaves = new CardBuilder();
+  const top = H - 1.2;
   const dark = new THREE.Color(v.dark), light = new THREE.Color(v.light), c = new THREE.Color();
   for (let k = 0; k < tiers; k++) {
     const t = k / (tiers - 1); // 0 = lowest whorl, 1 = top
-    const y = v.crownBase + (top - coneH * 0.6 - v.crownBase) * t;
-    const r = v.crownR * Math.pow(1 - t * 0.9, 1.1) + 0.25;
+    const y = v.crownBase + (top - v.crownBase) * t;
+    const r = v.crownR * Math.pow(1 - t * 0.92, 1.1) + 0.3;
     c.copy(dark).lerp(light, t * 0.8); // fresh growth is lighter near the top
-    let cone: THREE.BufferGeometry = new THREE.ConeGeometry(r, coneH, segs, 1).rotateY(pseudo(seed * 31 + k) * Math.PI * 2);
-    if (!low) cone = wobble(cone, 0.12, seed * 7 + k);
-    parts.push(paint(cone.translate(0, y + coneH / 2, 0), c.getHex(), 0.09, k + seed * 5));
+    const n = low ? Math.max(3, Math.round(3 + r)) : Math.round(5 + r * 2.5);
+    whorlCards(leaves, y, r * 1.1, n, 1.1 + r * 0.5, c.getHex(), seed * 31 + k);
   }
-  parts.push(paint(new THREE.ConeGeometry(0.3, 1.8, segs).translate(0, H - 0.9, 0), v.light, 0.05)); // leader
-  return liftUndersides(merge(parts), 1.9);
+  whorlCards(leaves, H - 0.4, 0.6, 3, 0.9, v.light, seed + 999); // leader
+  return withLeaves(parts, leaves);
 }
 
-/** Faceted leaf blob for broadleaf crowns. */
-function blob(r: number, x: number, y: number, z: number, color: number, seed: number, low: boolean): THREE.BufferGeometry {
-  return paint(wobble(new THREE.IcosahedronGeometry(r, low ? 0 : 1), 0.28, seed).scale(1, 0.82, 1).translate(x, y, z), color, 0.1, seed);
+/** Inner core of a broadleaf crown blob (keeps it from looking hollow). */
+function core(r: number, x: number, y: number, z: number, color: number, seed: number, low = false): THREE.BufferGeometry {
+  return paint(wobble(new THREE.IcosahedronGeometry(r, low ? 0 : 1), 0.25, seed).scale(1, 0.82, 1).translate(x, y, z), new THREE.Color(color).multiplyScalar(0.5).getHex(), 0.08, seed);
 }
 
 /** Tapered branch from (0,y0,0) out to (x,y1,z). */
 function branch(x: number, y0: number, y1: number, z: number, r: number, color: number): THREE.BufferGeometry {
   const len = Math.hypot(x, y1 - y0, z);
-  const g = new THREE.CylinderGeometry(r * 0.5, r, len, 5).translate(0, len / 2, 0);
+  const g = new THREE.CylinderGeometry(r * 0.5, r, len, 6).translate(0, len / 2, 0);
   const dir = new THREE.Vector3(x, y1 - y0, z).normalize();
   g.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir));
   return paint(g.translate(0, y0, 0), color, 0.06);
 }
 
+const V = (x: number, y: number, z: number): THREE.Vector3 => new THREE.Vector3(x, y, z);
+
 function pine(shape: number, low: boolean): THREE.BufferGeometry {
   const H = TREE_SPECIES[SPECIES.pine]!.height, R = TREE_SPECIES[SPECIES.pine]!.trunk;
   const bark = 0x8a5236;
   const parts: THREE.BufferGeometry[] = [
-    paint(new THREE.CylinderGeometry(0.08, R, H * 0.9, low ? 5 : 7).translate(0, H * 0.45, 0), bark, 0.08, shape),
+    paint(new THREE.CylinderGeometry(0.08, R, H * 0.9, low ? 6 : 9).translate(0, H * 0.45, 0), bark, 0.08, shape),
   ];
+  const leaves = new CardBuilder();
   const clumps = low ? 4 : 7;
   for (let k = 0; k < clumps; k++) {
     const a = (k / clumps) * Math.PI * 2 + shape;
@@ -249,56 +323,65 @@ function pine(shape: number, low: boolean): THREE.BufferGeometry {
     const y = H * (0.62 + 0.3 * t), out = 1.4 + 1.2 * (1 - t) + pseudo(k + shape * 9) * 0.6;
     const x = Math.cos(a) * out, z = Math.sin(a) * out;
     if (!low) parts.push(branch(x * 0.85, y - 1.1, y - 0.2, z * 0.85, 0.09, bark));
-    parts.push(paint(wobble(new THREE.IcosahedronGeometry(1.5 - t * 0.5, low ? 0 : 1), 0.25, k + shape).scale(1.25, 0.55, 1.25).translate(x, y, z),
-      k % 2 ? 0x2f5a2c : 0x3a6a33, 0.1, k));
+    const s = 1.5 - t * 0.5;
+    parts.push(core(s * 0.55, x, y, z, 0x2f5a2c, k + shape, low));
+    crownCards(leaves, V(x, y, z), V(s * 1.25, s * 0.6, s * 1.25), low ? 6 : 16, 1.25, LeafRegion.Needles, [0x2f5a2c, 0x3a6a33], k + shape * 13);
   }
-  parts.push(paint(wobble(new THREE.IcosahedronGeometry(1.3, low ? 0 : 1), 0.25, 99 + shape).scale(1.1, 0.7, 1.1).translate(0, H * 0.97, 0), 0x3f7136, 0.1));
-  return liftUndersides(merge(parts), 1.6);
+  crownCards(leaves, V(0, H * 0.97, 0), V(1.4, 0.9, 1.4), low ? 5 : 14, 1.2, LeafRegion.Needles, [0x3f7136], 99 + shape);
+  return withLeaves(parts, leaves);
 }
 
 function oak(shape: number, low: boolean): THREE.BufferGeometry {
   const H = TREE_SPECIES[SPECIES.oak]!.height, R = TREE_SPECIES[SPECIES.oak]!.trunk;
   const bark = 0x5b4632;
   const parts: THREE.BufferGeometry[] = [
-    paint(new THREE.CylinderGeometry(R * 0.6, R, H * 0.5, low ? 5 : 8).translate(0, H * 0.25, 0), bark, 0.08, shape),
+    paint(new THREE.CylinderGeometry(R * 0.6, R, H * 0.5, low ? 6 : 10).translate(0, H * 0.25, 0), bark, 0.08, shape),
   ];
+  if (!low) parts.push(paint(new THREE.CylinderGeometry(R, R * 1.5, 0.5, 10).translate(0, 0.25, 0), bark, 0.06));
   if (!low) {
-    parts.push(paint(new THREE.CylinderGeometry(R, R * 1.5, 0.5, 8).translate(0, 0.25, 0), bark, 0.06));
     for (let k = 0; k < 3; k++) {
       const a = (k / 3) * Math.PI * 2 + shape;
       parts.push(branch(Math.cos(a) * 2.2, H * 0.45, H * 0.68, Math.sin(a) * 2.2, R * 0.45, bark));
     }
   }
   const greens = [0x3c6e2c, 0x4a7d32, 0x355f27];
+  const leaves = new CardBuilder();
   const n = low ? 4 : 8;
   for (let k = 0; k < n; k++) {
     const a = (k / n) * Math.PI * 2 + shape * 0.7;
     const ring = k % 2 ? 2.6 : 1.6;
-    parts.push(blob(2.2 + pseudo(k + shape) * 0.8, Math.cos(a) * ring, H * 0.7 + (k % 3) * 0.6, Math.sin(a) * ring, greens[k % 3]!, k + shape * 11, low));
+    const r = 2.2 + pseudo(k + shape) * 0.8;
+    const c = V(Math.cos(a) * ring, H * 0.7 + (k % 3) * 0.6, Math.sin(a) * ring);
+    parts.push(core(r * 0.55, c.x, c.y, c.z, greens[k % 3]!, k + shape * 11, low));
+    crownCards(leaves, c, V(r, r * 0.8, r), low ? 8 : 24, 1.5, LeafRegion.Broadleaf, greens, k + shape * 11);
   }
-  parts.push(blob(2.6, 0, H * 0.86, 0, 0x4a7d32, 77 + shape, low));
-  return liftUndersides(merge(parts), 1.7);
+  parts.push(core(1.4, 0, H * 0.86, 0, 0x4a7d32, 77 + shape, low));
+  crownCards(leaves, V(0, H * 0.86, 0), V(2.6, 2.1, 2.6), low ? 9 : 26, 1.5, LeafRegion.Broadleaf, greens, 77 + shape);
+  return withLeaves(parts, leaves);
 }
 
 function birch(shape: number, low: boolean): THREE.BufferGeometry {
   const H = TREE_SPECIES[SPECIES.birch]!.height, R = TREE_SPECIES[SPECIES.birch]!.trunk;
   const parts: THREE.BufferGeometry[] = [
-    paint(new THREE.CylinderGeometry(0.06, R, H * 0.95, low ? 5 : 7).translate(0, H * 0.475, 0), 0xe8e4da, 0.04, shape),
+    paint(new THREE.CylinderGeometry(0.06, R, H * 0.95, low ? 6 : 9).translate(0, H * 0.475, 0), 0xe8e4da, 0.04, shape),
   ];
   if (!low) {
     // Dark lenticel bands on the white bark.
     for (let k = 0; k < 7; k++) {
       const y = 0.8 + k * 1.3 + pseudo(k + shape) * 0.4;
       const r = R * (1 - y / H) + 0.07;
-      parts.push(paint(new THREE.CylinderGeometry(r + 0.012, r + 0.012, 0.12, 7).translate(0, y, 0), 0x2b2a28, 0.05));
+      parts.push(paint(new THREE.CylinderGeometry(r + 0.012, r + 0.012, 0.12, 9).translate(0, y, 0), 0x2b2a28, 0.05));
     }
   }
+  const leaves = new CardBuilder();
   const n = low ? 3 : 7;
   for (let k = 0; k < n; k++) {
     const t = k / n, a = k * 2.4 + shape;
-    parts.push(blob(1.3 + (1 - t) * 0.5, Math.cos(a) * 1.0, H * (0.5 + 0.45 * t), Math.sin(a) * 1.0, k % 2 ? 0x8fae3e : 0x7ea236, k + shape * 13, low));
+    const r = 1.3 + (1 - t) * 0.5;
+    const c = V(Math.cos(a) * 1.0, H * (0.5 + 0.45 * t), Math.sin(a) * 1.0);
+    crownCards(leaves, c, V(r, r * 0.85, r), low ? 7 : 20, 1.05, LeafRegion.Broadleaf, [0x8fae3e, 0x7ea236, 0x6f9430], k + shape * 13);
   }
-  return liftUndersides(merge(parts), 1.5);
+  return withLeaves(parts, leaves);
 }
 
 function palm(shape: number, low: boolean): THREE.BufferGeometry {
@@ -312,21 +395,20 @@ function palm(shape: number, low: boolean): THREE.BufferGeometry {
     const t = k / segs, len = H / segs;
     const ang = lean * (0.4 + t); // bends more toward the top
     const r0 = R * (1 - t * 0.35), r1 = R * (1 - (t + 1 / segs) * 0.35);
-    const g = new THREE.CylinderGeometry(r1, r0 * 1.05, len, 6).translate(0, len / 2, 0).rotateZ(-ang).translate(px, py, 0);
+    const g = new THREE.CylinderGeometry(r1, r0 * 1.05, len, 8).translate(0, len / 2, 0).rotateZ(-ang).translate(px, py, 0);
     parts.push(paint(g, k % 2 ? 0x8c7350 : 0x7a6244, 0.06, k));
     px += Math.sin(ang) * len;
     py += Math.cos(ang) * len;
   }
-  // Fronds: long flattened leaves drooping from the crown.
-  const fronds = low ? 5 : 9;
+  // Fronds: long leaves arcing out and drooping from the crown.
+  const leaves = new CardBuilder();
+  const fronds = low ? 6 : 11;
   for (let k = 0; k < fronds; k++) {
     const a = (k / fronds) * Math.PI * 2 + shape;
-    const leaf = new THREE.ConeGeometry(0.45, 4.2, 4, 1).scale(1, 1, 0.18).translate(0, 2.1, 0)
-      .rotateZ(-1.15 - pseudo(k + shape) * 0.35).rotateY(a).translate(px, py - 0.1, 0);
-    parts.push(paint(leaf, k % 2 ? 0x4d8a34 : 0x3f7a2c, 0.1, k));
+    frondCards(leaves, V(px, py - 0.1, 0), a, 3.6 + pseudo(k + shape) * 1.2, 1.5, k % 2 ? 0x4d8a34 : 0x3f7a2c, k + shape * 7, low ? 2 : 4);
   }
   if (!low) for (let k = 0; k < 3; k++) parts.push(paint(new THREE.IcosahedronGeometry(0.17, 0).translate(px + Math.cos(k * 2.1) * 0.3, py - 0.35, Math.sin(k * 2.1) * 0.3), 0x5a4026, 0.05)); // coconuts
-  return liftUndersides(merge(parts), 1.6);
+  return withLeaves(parts, leaves);
 }
 
 function treeGeometry(variant: number, low: boolean): THREE.BufferGeometry {
@@ -349,20 +431,6 @@ function treeGeometry(variant: number, low: boolean): THREE.BufferGeometry {
       }
     }
   });
-}
-
-/**
- * Downward-facing triangles (the underside of each whorl) only receive the
- * hemisphere's dim ground light, so under a dense canopy they render almost
- * black. Brighten their vertex colour to fake light filtering through the
- * needles.
- */
-function liftUndersides(g: THREE.BufferGeometry, factor: number): THREE.BufferGeometry {
-  const n = g.attributes['normal']!, c = g.attributes['color']!;
-  for (let i = 0; i < n.count; i++) {
-    if (n.getY(i) < -0.6) c.setXYZ(i, Math.min(1, c.getX(i) * factor), Math.min(1, c.getY(i) * factor), Math.min(1, c.getZ(i) * factor));
-  }
-  return g;
 }
 
 /** Distant-LOD tree: same silhouette, far fewer triangles. */
@@ -810,7 +878,7 @@ export function stairsGeometry(): THREE.BufferGeometry {
 // the mouth (open) toward −Z. Drawn double-sided: you see it from inside.
 // ---------------------------------------------------------------------------
 
-export const caveMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true, side: THREE.DoubleSide });
+export const caveMaterial = createDetailMaterial({ side: THREE.DoubleSide, grainScale: 1.6, grainStrength: 1 });
 
 export function caveShellGeometry(length: number, width: number, height: number, seed: number): THREE.BufferGeometry {
   const dome = new THREE.SphereGeometry(1, 18, 9, 0, Math.PI * 2, 0, Math.PI / 2).toNonIndexed();

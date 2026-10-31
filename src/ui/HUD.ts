@@ -91,7 +91,10 @@ export class HUD {
 
     const h = this.cycle.hour;
     this.el['clock']!.textContent = `Day ${this.cycle.day} · ${pad(Math.floor(h))}:${pad(Math.floor((h % 1) * 60))} · ${this.cycle.ambientTempC.toFixed(0)}°C${this.cycle.raining ? ' · rain' : ''}`;
-    this.el['fps']!.textContent = `${loop.stats.fps.toFixed(0)} fps`;
+    const fps = loop.stats.fps;
+    const fpsEl = this.el['fps']!;
+    fpsEl.textContent = `${fps.toFixed(0)} FPS`;
+    fpsEl.dataset['level'] = fps >= 50 ? 'good' : fps >= 30 ? 'ok' : 'bad';
 
     if (player === undefined) return;
     const s = world.require(player, SurvivorC);

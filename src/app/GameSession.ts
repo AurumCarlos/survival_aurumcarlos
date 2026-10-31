@@ -49,6 +49,7 @@ import { SleepSystem } from '../systems/SleepSystem';
 import { StationSystem } from '../systems/StationSystem';
 import { bedSpawnPoint, chooseBed, dropBelongings, revive } from '../systems/Respawn';
 import { StructureInteraction } from '../systems/StructureInteraction';
+import { TEST_BAG, giveTestKit } from '../systems/TestKit';
 import { HUD } from '../ui/HUD';
 import { InventoryUI } from '../ui/InventoryUI';
 import type { MapConfig } from '../world/MapConfig';
@@ -166,7 +167,14 @@ export class GameSession {
     const survival = new SurvivalSystem(events);
     this.crafting = new CraftingSystem(events);
     this.interaction = new InteractionSystem(d.input, events, (w, e) => this.crafting.inventoryOf(w, e), this.populated.resourceIndex);
-    if (!d.snapshot) {
+    if (!d.snapshot && d.map.testMode) {
+      // Test mode: bigger bag (set before the grid is built), best gear, stacks of everything.
+      const survivor = world.require(this.player, SurvivorC);
+      survivor.inventory.cols = TEST_BAG.cols;
+      survivor.inventory.rows = TEST_BAG.rows;
+      const lost = giveTestKit(survivor, this.crafting.inventoryOf(world, this.player));
+      if (lost.length) console.warn('Test kit: no room for', lost);
+    } else if (!d.snapshot) {
       const inv = this.crafting.inventoryOf(world, this.player);
       inv.add('wood', 3);
       inv.add('stone', 2);
@@ -283,7 +291,7 @@ export class GameSession {
     const viewModel = new ViewModel(d.renderer);
     this.loop
       .addSystem(renderSync)
-      .addSystem(new CullingSystem(d.renderer.camera, built.chunks))
+      .addSystem(new CullingSystem(d.renderer.camera, built.chunks, built.props, () => d.renderer.propDistances))
       .addSystem(new ResourceVisualSystem(built, this.events))
       .addSystem(new HitFlashSystem(this.events, this.world))
       .addSystem(new CreatureAnimationSystem())
